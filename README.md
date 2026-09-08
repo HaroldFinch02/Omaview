@@ -7,6 +7,16 @@
 
 ---
 
+<p align="center">
+  <img src="assets/omaview_sample1.png" alt="Omaview Image Viewer" width="100%" />
+</p>
+
+<p align="center">
+  <img src="assets/omaview_sample2.png" alt="Omaview Home and Albums Screen" width="100%" />
+</p>
+
+---
+
 ## ✦ Philosophy & Identity
 
 Omaview is designed from first principles for **Omarchy Linux** and the **Hyprland** wayland compositor:
