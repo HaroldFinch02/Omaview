@@ -34,7 +34,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-dev \
             libadwaita-1-dev \
-            libraw-dev \
             pkg-config
 
       - name: Set up Rust
