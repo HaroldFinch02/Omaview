@@ -1,10 +1,10 @@
-# Maintainer: Omarchy Community <https://github.com/omarchy/omaview>
+# Maintainer: Omarchy Community <https://github.com/HaroldFinch02/Omaview>
 pkgname=omaview
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="Dead-simple, theme-aware image viewer for Omarchy / Hyprland"
 arch=('x86_64' 'aarch64' 'riscv64')
-url="https://github.com/omarchy/omaview"
+url="https://github.com/HaroldFinch02/Omaview"
 license=('MIT')
 depends=('gtk4' 'libadwaita' 'glib2')
 optdepends=(

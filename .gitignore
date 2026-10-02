@@ -1,5 +1,8 @@
 # Rust build artifacts
 target/
+dist/
+*.tar.gz
+*.sha256
 **/*.rs.bk
 *.pdb
 
@@ -17,6 +20,7 @@ Thumbs.db
 
 # Log & core files
 *.log
+*.log.gz
 core
 core.*
 vgcore.*

@@ -3,7 +3,46 @@
 <div align="center">
   <img src="data/icons/hicolor/scalable/apps/omaview.svg" alt="Omaview Logo" width="128" height="128" />
   <h3>Dead-simple, instant, theme-aware image viewer for Omarchy Linux under Hyprland</h3>
+  <p>
+    <a href="https://github.com/HaroldFinch02/Omaview/releases/latest"><img src="https://img.shields.io/github/v/release/HaroldFinch02/Omaview?color=7aa2f7&label=Release" alt="Latest Release" /></a>
+    <img src="https://img.shields.io/badge/architecture-x86__64%20%7C%20aarch64-bb9af7" alt="Supported Architectures" />
+    <img src="https://img.shields.io/badge/license-MIT-7dcfff" alt="License" />
+  </p>
 </div>
+
+---
+
+## 📦 Downloads & Installation
+
+### Option 1: One-Line Universal Installer (Recommended)
+Automatically detects your architecture (x86_64 or ARM64), downloads the latest binary, and sets up desktop integration:
+```bash
+curl -fsSL https://raw.githubusercontent.com/HaroldFinch02/Omaview/main/install.sh | bash
+```
+
+### Option 2: Pre-compiled Binaries (GitHub Releases)
+Download standalone archives containing the binary, `.desktop` launcher, and icons:
+
+| Architecture | Platform | Download Link | Checksum |
+| :--- | :--- | :--- | :--- |
+| **x86_64** (Intel / AMD) | Linux | [omaview-x86_64-linux.tar.gz](https://github.com/HaroldFinch02/Omaview/releases/latest/download/omaview-x86_64-linux.tar.gz) | [SHA256](https://github.com/HaroldFinch02/Omaview/releases/latest/download/omaview-x86_64-linux.tar.gz.sha256) |
+| **aarch64** (ARM64 / Pi / Asahi) | Linux | [omaview-aarch64-linux.tar.gz](https://github.com/HaroldFinch02/Omaview/releases/latest/download/omaview-aarch64-linux.tar.gz) | [SHA256](https://github.com/HaroldFinch02/Omaview/releases/latest/download/omaview-aarch64-linux.tar.gz.sha256) |
+
+*To install manually from a downloaded archive:*
+```bash
+tar -xzf omaview-*-linux.tar.gz
+cd omaview-*-linux
+./install.sh
+```
+
+### Option 3: Omarchy / Arch Linux (AUR & PKGBUILD)
+```bash
+# Build & install local PKGBUILD:
+makepkg -si
+
+# Or install via yay:
+yay -S omaview
+```
 
 ---
 

@@ -7,6 +7,6 @@ Exec=omaview %U
 Icon=omaview
 Terminal=false
 Categories=Graphics;Viewer;
-MimeType=image/jpeg;image/png;image/webp;image/gif;image/bmp;image/tiff;image/x-icon;
+MimeType=image/jpeg;image/png;image/webp;image/gif;image/bmp;image/tiff;image/x-icon;image/x-sony-arw;image/x-canon-cr2;image/x-canon-cr3;image/x-nikon-nef;image/x-fuji-raf;image/x-adobe-dng;image/x-panasonic-rw2;image/x-olympus-orf;
 Keywords=image;viewer;picture;photo;graphics;
 StartupWMClass=omaview
