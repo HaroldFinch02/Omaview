@@ -16,6 +16,7 @@ pub struct BottomToolbar {
     #[allow(dead_code)]
     btn_adjust: Button,
     btn_info: Button,
+    btn_open_raw: Button,
     btn_trash: Button,
     btn_save: Button,
 
@@ -31,8 +32,8 @@ impl BottomToolbar {
         let container = Box::new(Orientation::Horizontal, 3);
         container.add_css_class("floating-pill");
         container.set_halign(gtk4::Align::Center);
-        container.set_valign(gtk4::Align::End);
-        container.set_margin_bottom(20);
+        container.set_valign(gtk4::Align::Center);
+        container.set_margin_bottom(0);
 
         let make_btn = |icon: &str, tooltip: &str| -> Button {
             let btn = Button::from_icon_name(icon);
@@ -87,7 +88,12 @@ impl BottomToolbar {
         let btn_info = make_btn("dialog-information-symbolic", "Image Info / EXIF (i)");
         container.append(&btn_info);
 
-        // 10. Trash (matches sample_ui.jpeg 10th icon)
+        // 10. Open RAW in External Editor (Darktable, etc.)
+        let btn_open_raw = make_btn("camera-photo-symbolic", "Open RAW in External Editor (Ctrl+O / o)");
+        btn_open_raw.set_visible(false);
+        container.append(&btn_open_raw);
+
+        // 11. Trash (matches sample_ui.jpeg 10th icon)
         let btn_trash = make_btn("user-trash-symbolic", "Move to Trash (Delete / d)");
         container.append(&btn_trash);
 
@@ -184,6 +190,7 @@ impl BottomToolbar {
             btn_rotate_cw,
             btn_adjust,
             btn_info,
+            btn_open_raw,
             btn_trash,
             btn_save,
             adjustments_popover,
@@ -191,6 +198,17 @@ impl BottomToolbar {
             scale_contrast,
             scale_saturation,
             scale_warmth,
+        }
+    }
+
+    pub fn connect_open_raw<F: Fn() + 'static>(&self, callback: F) {
+        self.btn_open_raw.connect_clicked(move |_| callback());
+    }
+
+    pub fn set_open_raw_visible(&self, visible: bool, tooltip: Option<&str>) {
+        self.btn_open_raw.set_visible(visible);
+        if let Some(tip) = tooltip {
+            self.btn_open_raw.set_tooltip_text(Some(tip));
         }
     }
 

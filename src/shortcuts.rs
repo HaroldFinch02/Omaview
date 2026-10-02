@@ -27,6 +27,7 @@ pub enum AppAction {
     ToggleZen,
     ToggleFilmstrip,
     Save,
+    OpenExternal,
     ShowHelp,
     ToggleFullscreen,
     Escape,
@@ -77,6 +78,7 @@ pub fn create_key_controller<F: Fn(AppAction) -> glib::Propagation + 'static>(
             Key::g | Key::G => Some(AppAction::ToggleFilmstrip),
 
             Key::s | Key::S => Some(AppAction::Save),
+            Key::o | Key::O => Some(AppAction::OpenExternal),
 
             Key::question | Key::slash if is_shift => Some(AppAction::ShowHelp),
             Key::F1 => Some(AppAction::ShowHelp),

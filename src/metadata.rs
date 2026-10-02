@@ -15,7 +15,7 @@ pub struct ExifInfo {
     pub datetime: Option<String>,
 }
 
-pub fn extract_exif(path: &Path) -> Option<ExifInfo> {
+fn extract_exif_from_file(path: &Path) -> Option<ExifInfo> {
     let file = File::open(path).ok()?;
     let mut bufreader = std::io::BufReader::new(file);
     let exifreader = exif::Reader::new();
@@ -49,6 +49,27 @@ pub fn extract_exif(path: &Path) -> Option<ExifInfo> {
     }
 
     Some(info)
+}
+
+pub fn extract_exif(path: &Path) -> Option<ExifInfo> {
+    if let Some(info) = extract_exif_from_file(path) {
+        return Some(info);
+    }
+
+    if crate::raw_loader::is_raw_image(path) {
+        if let Some(companion) = crate::raw_loader::find_companion_jpeg(path) {
+            if let Some(info) = extract_exif_from_file(&companion) {
+                return Some(info);
+            }
+        }
+        if let Some(cached) = crate::raw_loader::get_cached_raw_preview_path(path) {
+            if let Some(info) = extract_exif_from_file(&cached) {
+                return Some(info);
+            }
+        }
+    }
+
+    None
 }
 
 #[derive(Clone)]
@@ -145,7 +166,12 @@ pub fn create_exif_popover(
     add_row(&grid, &mut row, "Dimensions", &format!("{} × {} px", width, height));
     add_row(&grid, &mut row, "File Size", file_size_str);
 
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+    if crate::raw_loader::is_raw_image(path) {
+        add_row(&grid, &mut row, "RAW Format", crate::raw_loader::raw_format_badge(path));
+        if crate::raw_loader::find_companion_jpeg(path).is_some() {
+            add_row(&grid, &mut row, "Companion", "RAW + JPEG");
+        }
+    } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         add_row(&grid, &mut row, "Format", &ext.to_ascii_uppercase());
     }
 

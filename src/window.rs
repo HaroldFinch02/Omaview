@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 use gtk4::prelude::*;
-use gtk4::{Box, Button, EventControllerMotion, Label, Orientation, Overlay, Stack, StackTransitionType};
+use gtk4::{Box, Button, CenterBox, EventControllerMotion, Label, Orientation, Overlay, Stack, StackTransitionType};
 use libadwaita::prelude::*;
 use libadwaita::ApplicationWindow;
 
@@ -42,9 +42,10 @@ pub struct MainWindow {
     filmstrip: Filmstrip,
     toolbar: BottomToolbar,
     metadata_pill: MetadataPill,
+    top_bar: CenterBox,
+    bottom_bar: Box,
     btn_home: Button,
     btn_top_save: Button,
-    top_left_box: Box,
     btn_nav_left: Button,
     btn_nav_right: Button,
     cache: ImageCache,
@@ -63,7 +64,7 @@ impl MainWindow {
 
         window.add_css_class("omaview-window");
 
-        let cache = ImageCache::new(10, 150);
+        let cache = ImageCache::new(24, 300);
         let colors = theme_manager.get_colors();
 
         let home_screen = HomeScreen::new(cache.clone(), colors.clone());
@@ -80,13 +81,11 @@ impl MainWindow {
             home_theme.set_colors(new_colors.clone());
         });
 
-        // Top-left box holding Home Button, Metadata Pill, and Save Button
+        // Top-left box holding Home Button and Metadata Pill
         let top_left_box = Box::new(Orientation::Horizontal, 8);
         top_left_box.add_css_class("top-bar-box");
         top_left_box.set_halign(gtk4::Align::Start);
-        top_left_box.set_valign(gtk4::Align::Start);
-        top_left_box.set_margin_top(16);
-        top_left_box.set_margin_start(16);
+        top_left_box.set_valign(gtk4::Align::Center);
 
         let btn_home = Button::from_icon_name("go-home-symbolic");
         btn_home.add_css_class("nav-home-btn");
@@ -98,9 +97,7 @@ impl MainWindow {
         btn_top_save.set_has_frame(false);
         btn_top_save.add_css_class("save-pill-btn");
         btn_top_save.set_halign(gtk4::Align::End);
-        btn_top_save.set_valign(gtk4::Align::Start);
-        btn_top_save.set_margin_top(16);
-        btn_top_save.set_margin_end(16);
+        btn_top_save.set_valign(gtk4::Align::Center);
         btn_top_save.set_tooltip_text(Some("Save Changes (Ctrl+S / s)"));
         let save_lbl = Label::new(Some("Save"));
         btn_top_save.set_child(Some(&save_lbl));
@@ -133,22 +130,54 @@ impl MainWindow {
         }));
 
         // Layout:
-        // Viewport Overlay covers the image area with pills & chevrons
-        let viewport_overlay = Overlay::new();
-        viewport_overlay.set_hexpand(true);
-        viewport_overlay.set_vexpand(true);
-        viewport_overlay.set_child(Some(viewport.widget()));
+        // 1. Top Controls Bar: Top-Left (Home + Metadata), Center (CropBar), Top-Right (Save)
+        let top_bar = CenterBox::new();
+        top_bar.add_css_class("viewer-top-bar");
+        top_bar.set_margin_top(14);
+        top_bar.set_margin_bottom(8);
+        top_bar.set_margin_start(16);
+        top_bar.set_margin_end(16);
 
-        viewport_overlay.add_overlay(&top_left_box);
-        viewport_overlay.add_overlay(&btn_top_save);
-        viewport_overlay.add_overlay(crop_bar.widget());
-        viewport_overlay.add_overlay(&btn_nav_left);
-        viewport_overlay.add_overlay(&btn_nav_right);
-        viewport_overlay.add_overlay(toolbar.widget());
+        top_bar.set_start_widget(Some(&top_left_box));
+        top_bar.set_center_widget(Some(crop_bar.widget()));
+        top_bar.set_end_widget(Some(&btn_top_save));
 
+        // 2. Middle Area: Viewport + Left/Right Nav Chevrons
+        // The container is strictly limited between the top and bottom controls so edit options do not overlap
+        let middle_overlay = Overlay::new();
+        middle_overlay.add_css_class("viewer-middle-overlay");
+        middle_overlay.set_hexpand(true);
+        middle_overlay.set_vexpand(true);
+        middle_overlay.set_child(Some(viewport.widget()));
+        middle_overlay.add_overlay(&btn_nav_left);
+        middle_overlay.add_overlay(&btn_nav_right);
+
+        // 3. Bottom Controls Bar: Bottom Toolbar (Edit options)
+        let bottom_bar = Box::new(Orientation::Horizontal, 0);
+        bottom_bar.add_css_class("viewer-bottom-bar");
+        bottom_bar.set_halign(gtk4::Align::Fill);
+        bottom_bar.set_valign(gtk4::Align::Center);
+        bottom_bar.set_margin_top(8);
+        bottom_bar.set_margin_bottom(14);
+
+        toolbar.widget().set_halign(gtk4::Align::Center);
+        toolbar.widget().set_valign(gtk4::Align::Center);
+        toolbar.widget().set_hexpand(true);
+        bottom_bar.append(toolbar.widget());
+
+        // 4. Center Column: Top Bar + Middle Area (Viewport) + Bottom Bar
+        let center_column = Box::new(Orientation::Vertical, 0);
+        center_column.add_css_class("viewer-center-column");
+        center_column.set_hexpand(true);
+        center_column.set_vexpand(true);
+        center_column.append(&top_bar);
+        center_column.append(&middle_overlay);
+        center_column.append(&bottom_bar);
+
+        // 5. Main Horizontal Box: Center Column + Filmstrip (right)
         let main_h_box = Box::new(Orientation::Horizontal, 0);
         main_h_box.add_css_class("omaview-main-box");
-        main_h_box.append(&viewport_overlay);
+        main_h_box.append(&center_column);
         main_h_box.append(filmstrip.widget());
 
         // Stack with Home Screen and Image Viewer
@@ -169,9 +198,10 @@ impl MainWindow {
             filmstrip,
             toolbar,
             metadata_pill,
+            top_bar,
+            bottom_bar,
             btn_home,
             btn_top_save,
-            top_left_box,
             btn_nav_left,
             btn_nav_right,
             cache,
@@ -179,7 +209,7 @@ impl MainWindow {
             state,
         };
 
-        win.setup_controllers(&viewport_overlay);
+        win.setup_controllers(&center_column);
         win.setup_signals();
 
         ACTIVE_WINDOW.with(|cell| {
@@ -193,7 +223,7 @@ impl MainWindow {
         &self.window
     }
 
-    fn setup_controllers(&self, overlay: &Overlay) {
+    fn setup_controllers(&self, container: &Box) {
         // Keyboard Controller
         let win_self = self.clone();
         let key_controller = create_key_controller(move |action| {
@@ -201,8 +231,7 @@ impl MainWindow {
         });
         self.window.add_controller(key_controller);
 
-        // Mouse Motion Controller for top pill auto-hide
-        let top_left = self.top_left_box.clone();
+        // Mouse Motion Controller for nav chevrons auto-hide
         let nav_l = self.btn_nav_left.clone();
         let nav_r = self.btn_nav_right.clone();
         let state_motion = self.state.clone();
@@ -214,7 +243,6 @@ impl MainWindow {
                 return;
             }
 
-            top_left.set_visible(true);
             nav_l.set_visible(true);
             nav_r.set_visible(true);
 
@@ -222,7 +250,6 @@ impl MainWindow {
                 src.remove();
             }
 
-            let top_left_clone = top_left.clone();
             let nav_l_clone = nav_l.clone();
             let nav_r_clone = nav_r.clone();
             let state_timer = state_motion.clone();
@@ -230,7 +257,6 @@ impl MainWindow {
                 let mut st = state_timer.borrow_mut();
                 st.idle_hide_pill_source = None;
                 if !st.zen_mode {
-                    top_left_clone.set_visible(false);
                     nav_l_clone.set_visible(false);
                     nav_r_clone.set_visible(false);
                 }
@@ -239,7 +265,7 @@ impl MainWindow {
             s.idle_hide_pill_source = Some(source_id);
         });
 
-        overlay.add_controller(motion_controller);
+        container.add_controller(motion_controller);
     }
 
     fn setup_signals(&self) {
@@ -366,11 +392,19 @@ impl MainWindow {
 
         let win_trash = self.clone();
         self.toolbar.connect_trash(move || win_trash.trash_current());
+
+        let win_open_raw = self.clone();
+        self.toolbar.connect_open_raw(move || {
+            win_open_raw.open_current_in_raw_editor();
+        });
     }
 
     pub fn handle_action(&self, action: AppAction) -> glib::Propagation {
         match action {
             AppAction::Home => self.show_home(),
+            AppAction::OpenExternal => {
+                self.open_current_in_raw_editor();
+            }
             AppAction::NextImage => self.next_image(),
             AppAction::PrevImage => self.prev_image(),
             AppAction::ZoomIn => self.viewport.zoom_in(),
@@ -483,6 +517,7 @@ impl MainWindow {
         }
 
         self.filmstrip.set_paths(paths, initial_index);
+        self.preload_neighbors(initial_index);
         self.go_to_index(initial_index);
         self.show_viewer();
     }
@@ -509,6 +544,18 @@ impl MainWindow {
         self.toolbar.reset_adjustments_ui();
         self.update_save_button();
 
+        let is_raw = crate::raw_loader::is_raw_image(&path);
+        if is_raw {
+            let editor_name = crate::external_editor::detect_raw_editor().map(|e| e.display_name);
+            let tip = editor_name
+                .as_deref()
+                .map(|name| format!("Open RAW in {} (Ctrl+O / o)", name))
+                .unwrap_or_else(|| "Open RAW in External Editor (Ctrl+O / o)".to_string());
+            self.toolbar.set_open_raw_visible(true, Some(&tip));
+        } else {
+            self.toolbar.set_open_raw_visible(false, None);
+        }
+
         // Check if already in memory cache
         if let Some(loaded) = self.cache.get_image(&path) {
             self.viewport.set_image(loaded.clone());
@@ -516,6 +563,14 @@ impl MainWindow {
             self.preload_neighbors(index);
             return;
         }
+
+        // Instant visual feedback: display thumbnail preview while full resolution decodes
+        if let Some(thumb) = self.cache.get_thumbnail(&path) {
+            self.viewport.set_thumbnail_preview(&thumb);
+        }
+
+        // Immediately start preloading neighbors so rapid next/prev clicks are instant
+        self.preload_neighbors(index);
 
         // Otherwise load on background thread
         let cache_clone = self.cache.clone();
@@ -554,6 +609,20 @@ impl MainWindow {
         }
     }
 
+    pub fn open_current_in_raw_editor(&self) {
+        let path = {
+            let s = self.state.borrow();
+            if s.paths.is_empty() {
+                return;
+            }
+            s.paths[s.current_index].clone()
+        };
+
+        if crate::raw_loader::is_raw_image(&path) {
+            let _ = crate::external_editor::launch_in_raw_editor(&path);
+        }
+    }
+
     pub fn next_image(&self) {
         let (curr, total) = {
             let s = self.state.borrow();
@@ -577,16 +646,14 @@ impl MainWindow {
         let zen = s.zen_mode;
 
         if zen {
-            self.top_left_box.set_visible(false);
-            self.btn_top_save.set_visible(false);
-            self.toolbar.widget().set_visible(false);
+            self.top_bar.set_visible(false);
+            self.bottom_bar.set_visible(false);
             self.btn_nav_left.set_visible(false);
             self.btn_nav_right.set_visible(false);
             self.filmstrip.widget().set_visible(false);
-            self.crop_bar.widget().set_visible(false);
         } else {
-            self.top_left_box.set_visible(true);
-            self.toolbar.widget().set_visible(true);
+            self.top_bar.set_visible(true);
+            self.bottom_bar.set_visible(true);
             self.btn_nav_left.set_visible(true);
             self.btn_nav_right.set_visible(true);
             self.filmstrip.widget().set_visible(s.filmstrip_visible);
@@ -808,24 +875,46 @@ impl MainWindow {
     }
 
     fn preload_neighbors(&self, current_idx: usize) {
-        let paths_to_preload = {
+        let (immediate_next, other_paths) = {
             let s = self.state.borrow();
-            let mut list = Vec::new();
-            if current_idx + 1 < s.paths.len() {
-                list.push(s.paths[current_idx + 1].clone());
-            }
+            let next_p = if current_idx + 1 < s.paths.len() {
+                Some(s.paths[current_idx + 1].clone())
+            } else {
+                None
+            };
+            let mut others = Vec::new();
             if current_idx > 0 {
-                list.push(s.paths[current_idx - 1].clone());
+                others.push(s.paths[current_idx - 1].clone());
             }
             if current_idx + 2 < s.paths.len() {
-                list.push(s.paths[current_idx + 2].clone());
+                others.push(s.paths[current_idx + 2].clone());
             }
-            list
+            if current_idx >= 2 {
+                others.push(s.paths[current_idx - 2].clone());
+            }
+            if current_idx + 3 < s.paths.len() {
+                others.push(s.paths[current_idx + 3].clone());
+            }
+            (next_p, others)
         };
 
         let cache = self.cache.clone();
+
+        // 1. High-priority dedicated worker for immediate next photo (covers >90% of user clicks)
+        if let Some(next_p) = immediate_next {
+            let cache_next = cache.clone();
+            std::thread::spawn(move || {
+                if cache_next.get_image(&next_p).is_none() {
+                    if let Ok(loaded) = load_decoded_image(&next_p) {
+                        cache_next.put_image(next_p, Arc::new(loaded));
+                    }
+                }
+            });
+        }
+
+        // 2. Secondary background worker for surrounding photos
         std::thread::spawn(move || {
-            for path in paths_to_preload {
+            for path in other_paths {
                 if cache.get_image(&path).is_none() {
                     if let Ok(loaded) = load_decoded_image(&path) {
                         cache.put_image(path, Arc::new(loaded));

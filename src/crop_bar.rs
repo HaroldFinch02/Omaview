@@ -23,8 +23,8 @@ impl CropBar {
         let container = GtkBox::new(Orientation::Horizontal, 6);
         container.add_css_class("crop-pill");
         container.set_halign(gtk4::Align::Center);
-        container.set_valign(gtk4::Align::Start);
-        container.set_margin_top(16);
+        container.set_valign(gtk4::Align::Center);
+        container.set_margin_top(0);
         container.set_visible(false);
 
         let icon = Image::from_icon_name("edit-cut-symbolic");

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
-use gio::prelude::*;
+use gio::prelude::FileExt;
+use crate::raw_loader::{is_raw_image, RAW_EXTENSIONS};
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "jpe", "jfif", "webp", "gif", "bmp", "tiff", "tif", "ico",
@@ -9,7 +10,8 @@ pub fn is_supported_image(path: &Path) -> bool {
     if let Some(ext) = path.extension() {
         if let Some(ext_str) = ext.to_str() {
             let lower = ext_str.to_ascii_lowercase();
-            return SUPPORTED_EXTENSIONS.contains(&lower.as_str());
+            return SUPPORTED_EXTENSIONS.contains(&lower.as_str())
+                || RAW_EXTENSIONS.contains(&lower.as_str());
         }
     }
     false
@@ -58,15 +60,36 @@ enum SortChunk {
 }
 
 /// Scans a directory and returns sorted paths of supported images.
+/// If both a RAW file and its companion JPEG exist (e.g. photo.ARW and photo.JPG),
+/// the RAW file is kept and the duplicate JPEG card is hidden, using the JPEG as companion.
 pub fn scan_directory_images(dir: &Path) -> Vec<PathBuf> {
-    let mut entries = Vec::new();
+    let mut raw_stems = std::collections::HashSet::new();
+    let mut all_files = Vec::new();
+
     if let Ok(read_dir) = std::fs::read_dir(dir) {
         for entry in read_dir.flatten() {
             let path = entry.path();
             if path.is_file() && is_supported_image(&path) {
-                entries.push(path);
+                if is_raw_image(&path) {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        raw_stems.insert(stem.to_ascii_lowercase());
+                    }
+                }
+                all_files.push(path);
             }
         }
+    }
+
+    let mut entries = Vec::new();
+    for path in all_files {
+        if !is_raw_image(&path) {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if raw_stems.contains(&stem.to_ascii_lowercase()) {
+                    continue;
+                }
+            }
+        }
+        entries.push(path);
     }
 
     entries.sort_by(|a, b| {
@@ -187,5 +210,36 @@ mod tests {
             names,
             vec!["img1.png", "img2.png", "img3.png", "img10.png", "img20.png"]
         );
+    }
+
+    #[test]
+    fn test_scan_directory_images_with_companion_pairing() {
+        let temp_dir = std::env::temp_dir().join(format!("omaview_test_pairing_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        // Create pair: DSC001.ARW and DSC001.JPG
+        let _ = std::fs::write(temp_dir.join("DSC001.ARW"), b"rawdata");
+        let _ = std::fs::write(temp_dir.join("DSC001.JPG"), b"jpgdata");
+
+        // Create standalone raw: DSC002.NEF
+        let _ = std::fs::write(temp_dir.join("DSC002.NEF"), b"rawdata2");
+
+        // Create standalone png: photo.png
+        let _ = std::fs::write(temp_dir.join("photo.png"), b"pngdata");
+
+        let scanned = scan_directory_images(&temp_dir);
+        let filenames: Vec<String> = scanned
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+
+        // DSC001.ARW should be included, companion DSC001.JPG must be omitted
+        assert!(filenames.contains(&"DSC001.ARW".to_string()));
+        assert!(!filenames.contains(&"DSC001.JPG".to_string()));
+        assert!(filenames.contains(&"DSC002.NEF".to_string()));
+        assert!(filenames.contains(&"photo.png".to_string()));
+        assert_eq!(scanned.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

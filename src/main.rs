@@ -1,11 +1,13 @@
 mod albums;
 mod app;
 mod crop_bar;
+mod external_editor;
 mod filmstrip;
 mod home;
 mod image_loader;
 mod image_ops;
 mod metadata;
+mod raw_loader;
 mod shortcuts;
 mod theme;
 mod toolbar;

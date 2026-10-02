@@ -110,10 +110,11 @@ pub fn generate_css(colors: &OmarchyColors) -> String {
 
     format!(
         r#"
+@define-color destructive_color {red};
+@define-color destructive_bg_color {red};
+@define-color destructive_fg_color #ffffff;
+
 :root {{
-  @define-color destructive_color {red};
-  @define-color destructive_bg_color {red};
-  @define-color destructive_fg_color #ffffff;
   --accent: {accent};
   --accent-r: {ar};
   --accent-g: {ag};
@@ -142,6 +143,10 @@ stack,
 stack > widget,
 .omaview-main-box,
 .home-screen,
+.viewer-top-bar,
+.viewer-bottom-bar,
+.viewer-center-column,
+.viewer-middle-overlay,
 scrolledwindow,
 scrolledwindow > viewport {{
   background-color: transparent;
@@ -307,11 +312,12 @@ scrolledwindow > viewport {{
   background-image: linear-gradient(135deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.01) 70%, rgba(255, 255, 255, 0.05) 100%);
   backdrop-filter: blur(16px);
   border-radius: 20px;
-  padding: 18px 22px;
+  padding: 16px 20px;
   border: 1px solid rgba(255, 255, 255, 0.24);
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.35),
               inset 0 1px 0 rgba(255, 255, 255, 0.50),
               inset 0 -1px 0 rgba(255, 255, 255, 0.08);
+  transition: all 250ms cubic-bezier(0.16, 1, 0.3, 1);
 }}
 
 .album-header {{
@@ -353,6 +359,7 @@ scrolledwindow > viewport {{
   color: rgba(255, 255, 255, 0.50);
   background: transparent;
   border: none;
+  transition: all 180ms cubic-bezier(0.16, 1, 0.3, 1);
 }}
 
 .album-action-btn:hover {{
@@ -360,11 +367,70 @@ scrolledwindow > viewport {{
   background: rgba(255, 255, 255, 0.10);
 }}
 
+.album-action-btn.active-highlight {{
+  color: var(--accent);
+  background: rgba({ar_255}, {ag_255}, {ab_255}, 0.18);
+  border: 1px solid var(--accent);
+}}
+
+.album-section-collapsed {{
+  padding: 8px 18px;
+  border-radius: 14px;
+  background-color: rgba(255, 255, 255, 0.035);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.20);
+}}
+
+.album-section-collapsed:hover {{
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.38);
+}}
+
+.album-section-expanded {{
+  padding: 14px 20px 18px 20px;
+  border-radius: 20px;
+  background-color: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.32);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45),
+              inset 0 1px 0 rgba(255, 255, 255, 0.65);
+}}
+
+.album-revealer,
+.album-content-stack {{
+  background: transparent;
+}}
+
+.album-expanded-scroll {{
+  background: transparent;
+}}
+
+.album-expanded-flowbox {{
+  background: transparent;
+  padding: 8px 4px 16px 4px;
+}}
+
+.album-expanded-flowbox flowboxchild {{
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  box-shadow: none;
+}}
+
+.album-expanded-flowbox flowboxchild:hover,
+.album-expanded-flowbox flowboxchild:selected,
+.album-expanded-flowbox flowboxchild:focus {{
+  background: transparent;
+  border: none;
+  outline: none;
+  box-shadow: none;
+}}
+
 .album-card {{
   padding: 5px;
   border-radius: 16px;
   background-color: transparent;
-  transition: all 180ms ease;
+  transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
 }}
 
 .album-card:hover {{
@@ -374,6 +440,30 @@ scrolledwindow > viewport {{
 .album-card-label {{
   font-size: 11.5px;
   color: rgba(255, 255, 255, 0.75);
+}}
+
+.album-progress-badge {{
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  background-color: rgba({ar_255}, {ag_255}, {ab_255}, 0.22);
+  border: 1px solid var(--accent);
+  color: #ffffff;
+}}
+
+.raw-badge {{
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background-color: rgba({ar_255}, {ag_255}, {ab_255}, 0.85);
+  color: #ffffff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+}}
+
+.raw-badge-companion {{
+  background-color: rgba(50, 170, 100, 0.85);
 }}
 
 .top-bar-box {{

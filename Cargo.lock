@@ -747,6 +747,7 @@ dependencies = [
  "image",
  "kamadak-exif",
  "libadwaita",
+ "libc",
  "notify",
  "serde",
  "toml 0.8.23",

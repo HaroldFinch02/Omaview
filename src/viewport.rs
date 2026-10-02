@@ -45,6 +45,7 @@ enum CropHandle {
 pub struct ViewportState {
     pub image: Option<Arc<DecodedImage>>,
     pub rendered_surface: Option<cairo::ImageSurface>,
+    pub surface_cache: std::collections::HashMap<PathBuf, (cairo::ImageSurface, u32, u32)>,
     pub rendered_width: u32,
     pub rendered_height: u32,
 
@@ -96,6 +97,7 @@ impl Viewport {
         let state = Rc::new(RefCell::new(ViewportState {
             image: None,
             rendered_surface: None,
+            surface_cache: std::collections::HashMap::new(),
             rendered_width: 0,
             rendered_height: 0,
             edits: ImageEdits::default(),
@@ -583,26 +585,53 @@ impl Viewport {
     }
 
     pub fn set_image(&self, img: Arc<DecodedImage>) {
-        let surface = rgba_to_cairo_surface(&img.rgba).ok();
-        let zoom_pct = {
-            let mut s = self.state.borrow_mut();
-            s.image = Some(img.clone());
-            s.edits = ImageEdits::default();
-            s.crop_mode = false;
-            s.crop_rect = [0.1, 0.1, 0.8, 0.8];
-            s.rendered_width = img.width;
-            s.rendered_height = img.height;
-            s.rendered_surface = surface;
-            s.is_fit = true;
-            s.pan_x = 0.0;
-            s.pan_y = 0.0;
-            (s.zoom * 100.0).round() as u32
+        let mut s = self.state.borrow_mut();
+        let (surface, w, h) = if let Some((cached_surf, cw, ch)) = s.surface_cache.get(&img.path) {
+            (Some(cached_surf.clone()), *cw, *ch)
+        } else if let Ok(surf) = crate::image_loader::cairo_data_to_surface(&img.cairo_data, img.width, img.height) {
+            if s.surface_cache.len() >= 12 {
+                s.surface_cache.clear();
+            }
+            s.surface_cache.insert(img.path.clone(), (surf.clone(), img.width, img.height));
+            (Some(surf), img.width, img.height)
+        } else if let Ok(surf) = rgba_to_cairo_surface(&img.rgba) {
+            (Some(surf), img.width, img.height)
+        } else {
+            (None, img.width, img.height)
         };
+
+        s.image = Some(img.clone());
+        s.edits = ImageEdits::default();
+        s.crop_mode = false;
+        s.crop_rect = [0.1, 0.1, 0.8, 0.8];
+        s.rendered_width = w;
+        s.rendered_height = h;
+        s.rendered_surface = surface;
+        s.is_fit = true;
+        s.pan_x = 0.0;
+        s.pan_y = 0.0;
+        let zoom_pct = (s.zoom * 100.0).round() as u32;
+        drop(s);
 
         if let Some(ref cb) = *self.on_zoom_changed.borrow() {
             cb(zoom_pct);
         }
         self.area.queue_draw();
+    }
+
+    /// Instantly displays a thumbnail preview while the full-resolution image decodes in the background.
+    pub fn set_thumbnail_preview(&self, thumb: &crate::image_loader::DecodedThumbnail) {
+        if let Ok(surf) = rgba_to_cairo_surface(&thumb.rgba) {
+            let mut s = self.state.borrow_mut();
+            s.rendered_width = thumb.width;
+            s.rendered_height = thumb.height;
+            s.rendered_surface = Some(surf);
+            s.is_fit = true;
+            s.pan_x = 0.0;
+            s.pan_y = 0.0;
+            drop(s);
+            self.area.queue_draw();
+        }
     }
 
     pub fn re_render_edits(&self) {
