@@ -205,6 +205,19 @@ impl BottomToolbar {
         self.btn_open_raw.connect_clicked(move |_| callback());
     }
 
+    pub fn connect_open_raw_secondary<F: Fn() + 'static>(&self, callback: F) {
+        let gesture = gtk4::GestureClick::new();
+        gesture.set_button(gdk4::BUTTON_SECONDARY);
+        gesture.connect_pressed(move |_, _, _, _| {
+            callback();
+        });
+        self.btn_open_raw.add_controller(gesture);
+    }
+
+    pub fn open_raw_button(&self) -> &Button {
+        &self.btn_open_raw
+    }
+
     pub fn set_open_raw_visible(&self, visible: bool, tooltip: Option<&str>) {
         self.btn_open_raw.set_visible(visible);
         if let Some(tip) = tooltip {

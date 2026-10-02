@@ -1,10 +1,10 @@
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 use gtk4::prelude::*;
-use gtk4::{Box, Button, CenterBox, EventControllerMotion, Label, Orientation, Overlay, Stack, StackTransitionType};
+use gtk4::{Box, Button, CenterBox, EventControllerMotion, Label, Orientation, Overlay, Popover, Stack, StackTransitionType};
 use libadwaita::prelude::*;
 use libadwaita::ApplicationWindow;
 
@@ -51,6 +51,8 @@ pub struct MainWindow {
     cache: ImageCache,
     _theme_manager: Rc<ThemeManager>,
     state: Rc<RefCell<WindowState>>,
+    raw_chooser_popover: Rc<RefCell<Option<Popover>>>,
+    toast_overlay: libadwaita::ToastOverlay,
 }
 
 impl MainWindow {
@@ -187,7 +189,10 @@ impl MainWindow {
         stack.add_named(home_screen.widget(), Some("home"));
         stack.add_named(&main_h_box, Some("viewer"));
 
-        window.set_content(Some(&stack));
+        let toast_overlay = libadwaita::ToastOverlay::new();
+        toast_overlay.set_child(Some(&stack));
+
+        window.set_content(Some(&toast_overlay));
 
         let win = Self {
             window,
@@ -207,6 +212,8 @@ impl MainWindow {
             cache,
             _theme_manager: theme_manager,
             state,
+            raw_chooser_popover: Rc::new(RefCell::new(None)),
+            toast_overlay,
         };
 
         win.setup_controllers(&center_column);
@@ -397,14 +404,18 @@ impl MainWindow {
         self.toolbar.connect_open_raw(move || {
             win_open_raw.open_current_in_raw_editor();
         });
+
+        let win_open_raw_sec = self.clone();
+        self.toolbar.connect_open_raw_secondary(move || {
+            win_open_raw_sec.show_raw_chooser_popover();
+        });
     }
 
     pub fn handle_action(&self, action: AppAction) -> glib::Propagation {
         match action {
             AppAction::Home => self.show_home(),
-            AppAction::OpenExternal => {
-                self.open_current_in_raw_editor();
-            }
+            AppAction::OpenExternal => self.open_current_in_raw_editor(),
+            AppAction::OpenExternalChooser => self.show_raw_chooser_popover(),
             AppAction::NextImage => self.next_image(),
             AppAction::PrevImage => self.prev_image(),
             AppAction::ZoomIn => self.viewport.zoom_in(),
@@ -544,17 +555,7 @@ impl MainWindow {
         self.toolbar.reset_adjustments_ui();
         self.update_save_button();
 
-        let is_raw = crate::raw_loader::is_raw_image(&path);
-        if is_raw {
-            let editor_name = crate::external_editor::detect_raw_editor().map(|e| e.display_name);
-            let tip = editor_name
-                .as_deref()
-                .map(|name| format!("Open RAW in {} (Ctrl+O / o)", name))
-                .unwrap_or_else(|| "Open RAW in External Editor (Ctrl+O / o)".to_string());
-            self.toolbar.set_open_raw_visible(true, Some(&tip));
-        } else {
-            self.toolbar.set_open_raw_visible(false, None);
-        }
+        self.update_raw_button_tooltip(&path);
 
         // Check if already in memory cache
         if let Some(loaded) = self.cache.get_image(&path) {
@@ -619,7 +620,129 @@ impl MainWindow {
         };
 
         if crate::raw_loader::is_raw_image(&path) {
-            let _ = crate::external_editor::launch_in_raw_editor(&path);
+            if !crate::external_editor::has_raw_compatible_app() {
+                let win_clone = self.clone();
+                self.show_toast_with_action(
+                    "No RAW editor installed. Install Darktable, RawTherapee, or digiKam.",
+                    "Choose…",
+                    move || {
+                        win_clone.show_raw_chooser_popover();
+                    },
+                );
+                return;
+            }
+
+            let config = crate::external_editor::load_config();
+            if config.editor.always_launch_default {
+                self.launch_default_raw_editor();
+            } else {
+                self.show_raw_chooser_popover();
+            }
+        }
+    }
+
+    pub fn show_toast(&self, message: &str) {
+        let toast = libadwaita::Toast::new(message);
+        toast.set_timeout(4);
+        self.toast_overlay.add_toast(toast);
+    }
+
+    pub fn show_toast_with_action<F: Fn() + 'static>(&self, message: &str, button_label: &str, on_click: F) {
+        let toast = libadwaita::Toast::new(message);
+        toast.set_button_label(Some(button_label));
+        toast.set_timeout(4);
+        toast.connect_button_clicked(move |_| {
+            on_click();
+        });
+        self.toast_overlay.add_toast(toast);
+    }
+
+    pub fn launch_default_raw_editor(&self) {
+        let path = {
+            let s = self.state.borrow();
+            if s.paths.is_empty() {
+                return;
+            }
+            s.paths[s.current_index].clone()
+        };
+
+        if let Some(editor) = crate::external_editor::get_preferred_editor() {
+            let config = crate::external_editor::load_config();
+            if let Ok(name) = crate::external_editor::launch_raw_editor(
+                &editor,
+                &path,
+                config.editor.custom_command.as_deref(),
+            ) {
+                self.show_toast(&format!("Opening in {}…", name));
+            }
+        } else {
+            self.show_raw_chooser_popover();
+        }
+    }
+
+    pub fn show_raw_chooser_popover(&self) {
+        let path = {
+            let s = self.state.borrow();
+            if s.paths.is_empty() {
+                return;
+            }
+            s.paths[s.current_index].clone()
+        };
+
+        // Close and unparent any currently open chooser popover
+        if let Some(existing) = self.raw_chooser_popover.borrow_mut().take() {
+            existing.popdown();
+            existing.unparent();
+        }
+
+        let win_refresh = self.clone();
+        let win_toast = self.clone();
+        let path_for_refresh = path.clone();
+        let popover = crate::external_editor::create_raw_chooser_popover(
+            &path,
+            move |app_name| {
+                win_toast.show_toast(&format!("Opening in {}…", app_name));
+            },
+            move || {
+                win_refresh.update_raw_button_tooltip(&path_for_refresh);
+            },
+        );
+
+        popover.set_parent(self.toolbar.open_raw_button());
+
+        let pop_ref = self.raw_chooser_popover.clone();
+        popover.connect_closed(move |p| {
+            p.unparent();
+            let mut r = pop_ref.borrow_mut();
+            if let Some(ref current) = *r {
+                if current == p {
+                    *r = None;
+                }
+            }
+        });
+
+        *self.raw_chooser_popover.borrow_mut() = Some(popover.clone());
+        popover.popup();
+    }
+
+    pub fn update_raw_button_tooltip(&self, path: &Path) {
+        let is_raw = crate::raw_loader::is_raw_image(path);
+        if is_raw {
+            let config = crate::external_editor::load_config();
+            let editor_name = crate::external_editor::get_preferred_editor().map(|e| e.display_name);
+
+            let tip = match (editor_name, config.editor.always_launch_default) {
+                (Some(name), true) => {
+                    format!("Open RAW in {} (Ctrl+O / o) • Right-click to choose", name)
+                }
+                (Some(name), false) => {
+                    format!("Choose RAW Editor (Ctrl+O / o) • Default: {}", name)
+                }
+                (None, _) => "Choose RAW Editor (Ctrl+O / o)".to_string(),
+            };
+            self.toolbar.set_open_raw_visible(true, Some(&tip));
+        } else {
+            self.toolbar.set_open_raw_visible(false, None);
         }
     }
 

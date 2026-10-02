@@ -28,6 +28,7 @@ pub enum AppAction {
     ToggleFilmstrip,
     Save,
     OpenExternal,
+    OpenExternalChooser,
     ShowHelp,
     ToggleFullscreen,
     Escape,
@@ -78,7 +79,8 @@ pub fn create_key_controller<F: Fn(AppAction) -> glib::Propagation + 'static>(
             Key::g | Key::G => Some(AppAction::ToggleFilmstrip),
 
             Key::s | Key::S => Some(AppAction::Save),
-            Key::o | Key::O => Some(AppAction::OpenExternal),
+            Key::o | Key::O if !is_shift => Some(AppAction::OpenExternal),
+            Key::O | Key::o if is_shift => Some(AppAction::OpenExternalChooser),
 
             Key::question | Key::slash if is_shift => Some(AppAction::ShowHelp),
             Key::F1 => Some(AppAction::ShowHelp),
@@ -139,6 +141,8 @@ pub fn show_shortcuts_dialog(parent: &impl IsA<Window>) {
         ("Tab / z", "Zen mode (hide chrome)"),
         ("g", "Toggle filmstrip"),
         ("s", "Save changes"),
+        ("o", "Open RAW in external editor"),
+        ("Shift+O", "Choose RAW external editor"),
         ("F11", "Toggle fullscreen"),
         ("q / Esc", "Quit / Close drawer"),
     ];

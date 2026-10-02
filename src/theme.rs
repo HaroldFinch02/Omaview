@@ -272,6 +272,100 @@ scrolledwindow > viewport {{
   color: var(--fg);
 }}
 
+.raw-chooser-popover {{
+  background-color: rgba({dbr_255}, {dbg_255}, {dbb_255}, 0.88);
+  background-image: linear-gradient(135deg, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0.02) 100%);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 18px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65),
+              inset 0 1px 0 rgba(255, 255, 255, 0.60),
+              inset 0 -1px 0 rgba(255, 255, 255, 0.12);
+  padding: 10px;
+  color: var(--fg);
+}}
+
+.raw-chooser-item {{
+  border-radius: 10px;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  transition: all 120ms ease;
+}}
+
+.raw-chooser-item:hover {{
+  background-color: rgba(255, 255, 255, 0.10);
+  border-color: rgba(255, 255, 255, 0.16);
+}}
+
+.raw-chooser-item.is-default {{
+  background-color: rgba({ar_255}, {ag_255}, {ab_255}, 0.16);
+  border-color: rgba({ar_255}, {ag_255}, {ab_255}, 0.40);
+}}
+
+.raw-chooser-launch-btn {{
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 4px 6px;
+  text-shadow: none;
+}}
+
+.raw-chooser-launch-btn:hover {{
+  background: transparent;
+}}
+
+.raw-chooser-desc {{
+  font-size: 11px;
+}}
+
+.raw-default-badge {{
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 9999px;
+  background-color: var(--accent);
+  color: #ffffff;
+}}
+
+.raw-star-btn {{
+  min-width: 28px;
+  min-height: 28px;
+  padding: 3px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: rgba(255, 255, 255, 0.45);
+  transition: all 120ms ease;
+}}
+
+.raw-star-btn:hover {{
+  background-color: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+}}
+
+.raw-star-btn.is-active {{
+  color: #f6d32d;
+  opacity: 1.0;
+}}
+
+.raw-custom-entry {{
+  border-radius: 8px;
+  background-color: rgba(0, 0, 0, 0.30);
+  border: 1px solid rgba(255, 255, 255, 0.20);
+  padding: 4px 8px;
+  color: var(--fg);
+}}
+
+.raw-custom-entry:focus {{
+  border-color: var(--accent);
+}}
+
+.raw-run-btn {{
+  border-radius: 8px;
+  padding: 4px 12px;
+  font-weight: 600;
+}}
+
 .home-screen {{
   background-color: transparent;
 }}
