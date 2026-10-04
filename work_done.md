@@ -313,3 +313,31 @@
 - Updated Cargo package/lockfile and PKGBUILD versions to 1.0.1; retained the existing `v*` release tag convention.
 - Built `cargo build --release --locked` and installed the optimized binary with `install -m 755 target/release/omaview ~/.local/bin/omaview`.
 - Verified installed and built binaries have identical SHA-256 hashes and all shared libraries resolve. Existing desktop launcher resolves to the local binary.
+
+## Quick performance follow-up — 2026-10-04
+- Removed the unused full-resolution RGBA buffer from cached decoded images, saving four retained bytes per pixel (~92 MiB for a 24-megapixel image). Cache accounting now includes only retained buffers.
+- Borrow original image data until geometry needs a new buffer, adjust owned RGBA pixels in place, and consume the edited buffer when producing a viewport preview. This removes redundant full-image cloning/allocation without changing edit order or calculations.
+- Recheck completed cache entries while registering requests to avoid a completion race causing another decode. Repeated image prefetch requests no longer accumulate no-op callbacks. Invalidated queued thumbnails skip decoding before they start.
+- Verification: 34 tests pass, including the GTK workflow smoke test and a new regression ensuring adjustments reuse their allocation and preserve alpha. Clippy with warnings denied, formatting, and diff checks pass. A temporary optimized harness compared previous/current output and unchanged source bytes across 192 combinations of RGB/RGBA/16-bit input, rotation, flips, crop, and adjustments: all matched.
+- Microbenchmark: median of five 3000x2000 RGBA adjustment previews fell from 101.4 ms to 68.2 ms (32.7% reduction). This measures the edit-to-RGBA stage on one synthetic image, not full-app FPS.
+- Rebuilt the optimized binary and updated the existing local installation with `install -m 755`; verified it matches the build byte-for-byte.
+
+## Snappier album expansion — 2026-10-04
+- Replaced the competing 250 ms row slide and layout-changing CSS transitions with immediate geometry updates and a single 90 ms content crossfade. Album color transitions now take 90 ms; button/card hover feedback takes 80 ms. Expansion explicitly respects GTK's animation setting.
+- First expansion creates at most 24 cards synchronously. Remaining cards append on GTK frame ticks in batches of at most 16 with a 2 ms construction budget, pausing while the grid is hidden and resuming on reopening. Completed grids are reused, preserving photo order and original open-image indices.
+- Made the album regression independent of the user's saved folders and extended it to check bounded initial construction, deferred completion, reopening without duplicates, late-card photo selection, and disabled animations.
+- Verification: all 34 tests pass; Clippy with warnings denied, formatting, and diff checks pass. Built the optimized release and updated the existing local binary using `install -m 755`; installed/build binaries match byte-for-byte. No full-app FPS measurement was taken.
+
+## Accordion expansion correction and Wayland verification — 2026-10-04
+- Replaced the previous 90 ms crossfade approach with a 200 ms native GTK ease-out cubic height transition, following shadcn accordion's clipped vertical opening/closing pattern. The stack swaps content without a competing fade; bounded grid construction is retained.
+- Fixed the regression introduced by `RevealerTransitionType::None`: it hides content while reserving the full child height. Restored `SlideDown`, so unselected albums become compact header-only rows and the selected album grows into the freed space.
+- Added a second album to the GTK regression and verified its actual allocated height reaches zero, its section stays compact, animated collapse passes through intermediate heights, rapid reversal restores the strip, and disabled animations still work.
+- Verified the actual release app on a temporary Hyprland headless Wayland output with `grim` screenshots of the original regression, corrected expansion, restored strips after collapse, and switching albums. Captures saved under `/home/sr/.codex/visualizations/2026/10/04/omaview-accordion/`. Removed the test output and stopped only the test app/input daemon afterward; the physical display returned to its original position.
+- All 34 tests pass; Clippy with warnings denied, formatting and diff checks pass. Installed the optimized release locally and verified installed/build binaries match byte-for-byte.
+- References: https://raw.githubusercontent.com/shadcn-ui/ui/main/apps/v4/registry/new-york-v4/ui/accordion.tsx and https://raw.githubusercontent.com/GNOME/gtk/main/gtk/gtkrevealer.c.
+
+## Release v1.0.2 — 2026-10-04
+- Includes the follow-up image memory/preview optimizations and corrected 200 ms accordion expansion with compact neighbouring album headers.
+- Updated Cargo package/lockfile and PKGBUILD to 1.0.2. Updated README release and download/checksum links to v1.0.2 and recorded this as a requirement for every future release in agents.md.
+- Fixed release publishing to upload individual SHA256 files advertised by README, alongside the archives and combined checksum list.
+- Validation: optimized 1.0.2 build passed; 33 non-GTK tests rerun, with the GTK regression previously verified on Wayland against the same application code. Clippy with warnings denied, formatting/diff checks, packaging shell syntax, and all six README release URLs pass. Updated the local binary and verified it matches the build.

@@ -113,5 +113,6 @@ jobs:
         with:
           files: |
             release_assets/*.tar.gz
+            release_assets/*.sha256
             release_assets/SHA256SUMS.txt
           generate_release_notes: true

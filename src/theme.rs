@@ -412,7 +412,7 @@ scrolledwindow > viewport {{
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.35),
               inset 0 1px 0 rgba(255, 255, 255, 0.50),
               inset 0 -1px 0 rgba(255, 255, 255, 0.08);
-  transition: all 250ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: background-color 90ms ease-out, border-color 90ms ease-out;
 }}
 
 .album-header {{
@@ -454,7 +454,7 @@ scrolledwindow > viewport {{
   color: rgba(255, 255, 255, 0.50);
   background: transparent;
   border: none;
-  transition: all 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: color 80ms ease-out, background-color 80ms ease-out;
 }}
 
 .album-action-btn:hover {{
@@ -525,7 +525,7 @@ scrolledwindow > viewport {{
   padding: 5px;
   border-radius: 16px;
   background-color: transparent;
-  transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: background-color 80ms ease-out;
 }}
 
 .album-card:hover {{

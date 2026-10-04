@@ -76,7 +76,6 @@ struct PendingLoad<T> {
 pub struct DecodedImage {
     pub path: PathBuf,
     pub image: Arc<DynamicImage>,
-    pub rgba: Arc<RgbaImage>,
     pub cairo_data: Arc<Vec<u8>>,
     pub width: u32,
     pub height: u32,
@@ -231,7 +230,6 @@ pub fn load_decoded_image(path: &Path) -> Result<DecodedImage, String> {
     Ok(DecodedImage {
         path: path.to_path_buf(),
         image: Arc::new(img),
-        rgba: Arc::new(rgba),
         cairo_data: Arc::new(cairo_data),
         width,
         height,
@@ -357,11 +355,19 @@ impl ImageCache {
         let priority = Arc::new(AtomicBool::new(foreground));
         let token = {
             let mut state = self.state.lock().unwrap();
+            // A worker may have finished between the initial lookup and this lock.
+            if let Some(image) = state.images.get(&path).cloned() {
+                drop(state);
+                callback(Ok(image));
+                return;
+            }
             if let Some(pending) = state.pending_images.get_mut(&path) {
                 if foreground {
                     pending.priority.store(true, Ordering::Relaxed);
                 }
-                pending.callbacks.push(Box::new(callback));
+                if foreground {
+                    pending.callbacks.push(Box::new(callback));
+                }
                 return;
             }
             let token = Arc::new(());
@@ -370,7 +376,11 @@ impl ImageCache {
                 PendingLoad {
                     token: token.clone(),
                     priority: priority.clone(),
-                    callbacks: vec![Box::new(callback)],
+                    callbacks: if foreground {
+                        vec![Box::new(callback)]
+                    } else {
+                        Vec::new()
+                    },
                 },
             );
             token
@@ -438,6 +448,11 @@ impl ImageCache {
         let priority = Arc::new(AtomicBool::new(foreground));
         let token = {
             let mut state = self.state.lock().unwrap();
+            if let Some(thumb) = state.thumbnails.get(&path).cloned() {
+                drop(state);
+                callback(Ok(thumb));
+                return;
+            }
             if let Some(pending) = state.pending_thumbnails.get_mut(&path) {
                 if foreground {
                     pending.priority.store(true, Ordering::Relaxed);
@@ -458,6 +473,17 @@ impl ImageCache {
         };
         let cache = self.clone();
         run_thumbnail_job(priority, move || {
+            // Invalidated queued thumbnails should not decode discarded files.
+            if !cache
+                .state
+                .lock()
+                .unwrap()
+                .pending_thumbnails
+                .get(&path)
+                .is_some_and(|p| Arc::ptr_eq(&p.token, &token))
+            {
+                return;
+            }
             let result = if let Some(image) = cache.get_image(&path) {
                 Ok(Arc::new(generate_thumbnail(&image.image, 240)))
             } else {
@@ -484,7 +510,7 @@ impl ImageCache {
 }
 
 fn decoded_bytes(img: &DecodedImage) -> usize {
-    img.image.as_bytes().len() + img.rgba.as_raw().len() + img.cairo_data.len()
+    img.image.as_bytes().len() + img.cairo_data.len()
 }
 
 fn put_loaded_image(state: &mut CacheState, path: PathBuf, img: Arc<DecodedImage>) {
@@ -560,7 +586,6 @@ mod tests {
         let image = Arc::new(DecodedImage {
             path: path.clone(),
             image: Arc::new(DynamicImage::new_rgb8(2, 2)),
-            rgba: thumb.rgba.clone(),
             cairo_data: Arc::new(vec![0; 16]),
             width: 2,
             height: 2,
@@ -654,7 +679,6 @@ mod tests {
             Arc::new(DecodedImage {
                 path: p.to_path_buf(),
                 image: Arc::new(DynamicImage::new_rgb8(1, 1)),
-                rgba: Arc::new(RgbaImage::new(1, 1)),
                 cairo_data: Arc::new(vec![0; 4]),
                 width: 1,
                 height: 1,

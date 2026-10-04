@@ -1,4 +1,5 @@
 use image::{DynamicImage, GenericImageView, ImageFormat, Rgba, RgbaImage};
+use std::borrow::Cow;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,24 +96,20 @@ impl ImageEdits {
 
 /// Applies color adjustments (exposure, contrast, saturation, warmth) to an RGBA image buffer.
 pub fn apply_adjustments(
-    rgba: &RgbaImage,
+    mut rgba: RgbaImage,
     exposure: f64,
     contrast: f64,
     saturation: f64,
     warmth: f64,
 ) -> RgbaImage {
-    let (width, height) = rgba.dimensions();
-    let mut out = RgbaImage::new(width, height);
-
     let exp_mult = 2.0f64.powf(exposure / 50.0);
     let contrast_factor = (100.0 + contrast) / (100.0 - contrast.min(99.0));
     let sat_factor = 1.0 + saturation / 100.0;
     let warmth_shift = warmth * 0.35;
 
-    for (x, y, pixel) in rgba.enumerate_pixels() {
+    for pixel in rgba.pixels_mut() {
         let [r, g, b, a] = pixel.0;
         if a == 0 {
-            out.put_pixel(x, y, *pixel);
             continue;
         }
 
@@ -140,15 +137,15 @@ pub fn apply_adjustments(
         let go = gf.round().clamp(0.0, 255.0) as u8;
         let bo = bf.round().clamp(0.0, 255.0) as u8;
 
-        out.put_pixel(x, y, Rgba([ro, go, bo, a]));
+        *pixel = Rgba([ro, go, bo, a]);
     }
 
-    out
+    rgba
 }
 
 /// Applies all edits (crop, rotation, flip, adjustments) to produce a new DynamicImage.
 pub fn apply_all_edits(base: &DynamicImage, edits: &ImageEdits) -> DynamicImage {
-    let mut current = base.clone();
+    let mut current = Cow::Borrowed(base);
 
     // 1. Crop
     if let Some([cx, cy, cw, ch]) = edits.crop_rect {
@@ -161,39 +158,42 @@ pub fn apply_all_edits(base: &DynamicImage, edits: &ImageEdits) -> DynamicImage 
             .clamp(0.0, h.saturating_sub(1) as f64) as u32;
         let pw = (cw * (w as f64)).round().clamp(1.0, (w - px) as f64) as u32;
         let ph = (ch * (h as f64)).round().clamp(1.0, (h - py) as f64) as u32;
-        current = current.crop_imm(px, py, pw, ph);
+        current = Cow::Owned(current.crop_imm(px, py, pw, ph));
     }
 
     // 2. Rotate
     match edits.rotation {
-        90 => current = current.rotate90(),
-        180 => current = current.rotate180(),
-        270 => current = current.rotate270(),
+        90 => current = Cow::Owned(current.rotate90()),
+        180 => current = Cow::Owned(current.rotate180()),
+        270 => current = Cow::Owned(current.rotate270()),
         _ => {}
     }
 
     // 3. Flip
     if edits.flip_h {
-        current = current.fliph();
+        current = Cow::Owned(current.fliph());
     }
     if edits.flip_v {
-        current = current.flipv();
+        current = Cow::Owned(current.flipv());
     }
 
     // 4. Adjustments
     if edits.has_adjustments() {
-        let rgba = current.to_rgba8();
+        let rgba = match current {
+            Cow::Borrowed(image) => image.to_rgba8(),
+            Cow::Owned(image) => image.into_rgba8(),
+        };
         let adjusted = apply_adjustments(
-            &rgba,
+            rgba,
             edits.exposure,
             edits.contrast,
             edits.saturation,
             edits.warmth,
         );
-        current = DynamicImage::ImageRgba8(adjusted);
+        current = Cow::Owned(DynamicImage::ImageRgba8(adjusted));
     }
 
-    current
+    current.into_owned()
 }
 
 pub fn save_image(img: &DynamicImage, path: &Path) -> Result<(), String> {
@@ -246,6 +246,18 @@ pub fn save_image(img: &DynamicImage, path: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use image::Rgba;
+
+    #[test]
+    fn adjustments_reuse_owned_pixels_and_preserve_alpha() {
+        let mut pixels = RgbaImage::new(2, 1);
+        pixels.put_pixel(0, 0, Rgba([64, 32, 16, 128]));
+        pixels.put_pixel(1, 0, Rgba([10, 20, 30, 0]));
+        let allocation = pixels.as_ptr();
+        let adjusted = apply_adjustments(pixels, 50.0, 0.0, 0.0, 0.0);
+        assert_eq!(adjusted.as_ptr(), allocation);
+        assert_eq!(adjusted.get_pixel(0, 0).0, [128, 64, 32, 128]);
+        assert_eq!(adjusted.get_pixel(1, 0).0, [10, 20, 30, 0]);
+    }
 
     #[test]
     fn crop_matches_display_after_geometry_and_repeated_crops() {
@@ -401,7 +413,7 @@ mod tests {
         }
 
         // Increase exposure
-        let adjusted = apply_adjustments(&img, 50.0, 0.0, 0.0, 0.0);
+        let adjusted = apply_adjustments(img.clone(), 50.0, 0.0, 0.0, 0.0);
         let px = adjusted.get_pixel(0, 0);
         // 2^(50/50) = 2.0x -> 128 * 2 = 255 (clamped)
         assert!(px[0] > 200);

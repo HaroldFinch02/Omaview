@@ -794,9 +794,11 @@ impl Viewport {
         let job_edits = edits.clone();
         crate::image_loader::run_background(move || {
             let processed = apply_all_edits(&image.image, &job_edits);
-            let rgba = processed.to_rgba8();
+            let width = processed.width();
+            let height = processed.height();
+            let rgba = processed.into_rgba8();
             let data = crate::image_loader::rgba_to_argb32_bytes(&rgba);
-            let _ = sender.send((data, processed.width(), processed.height()));
+            let _ = sender.send((data, width, height));
         });
         let viewport = self.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(8), move || {

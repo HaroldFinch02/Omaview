@@ -4,7 +4,7 @@ use gtk4::{
     Orientation, Overlay, PolicyType, Revealer, RevealerTransitionType, ScrolledWindow, Stack,
     StackTransitionType, Window,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -17,6 +17,9 @@ use crate::util::scan_directory_images;
 const CARD_WIDTH: f64 = 180.0;
 const CARD_HEIGHT: f64 = 116.0;
 const CARD_CORNER_RADIUS: f64 = 10.0;
+const GRID_FIRST_BATCH: usize = 24;
+const GRID_FRAME_BATCH: usize = 16;
+const ALBUM_EXPAND_MS: u32 = 200;
 
 fn draw_rounded_rect(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     let r = r.min(w / 2.0).min(h / 2.0);
@@ -279,9 +282,52 @@ impl HomeScreen {
         let accent_hex = colors.accent.as_deref().unwrap_or("#7aa2f7").to_string();
         let (ar, ag, ab) = crate::theme::parse_hex_color(&accent_hex).unwrap_or((0.48, 0.64, 0.97));
 
-        for (idx, img_path) in row.images.iter().enumerate() {
-            let card = self.create_thumbnail_card(img_path, &row.images, idx, ar, ag, ab);
+        // Make the first screen available immediately. The rest yields to GTK
+        // between frames, so large albums cannot monopolize the expand click.
+        let initial_count = row.images.len().min(GRID_FIRST_BATCH);
+        for idx in 0..initial_count {
+            let card = Self::create_thumbnail_card(
+                &self.state,
+                &row.images[idx],
+                &row.images,
+                idx,
+                ar,
+                ag,
+                ab,
+            );
             flow.append(&card);
+        }
+        if initial_count < row.images.len() {
+            let next = Cell::new(initial_count);
+            let images = row.images.clone();
+            let state_weak = Rc::downgrade(&self.state);
+            let dir = row.dir.clone();
+            flow.add_tick_callback(move |flow, _| {
+                let Some(state) = state_weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                if !flow.is_mapped() || state.borrow().expanded_album.as_ref() != Some(&dir) {
+                    return glib::ControlFlow::Continue;
+                }
+                let started = std::time::Instant::now();
+                let end = (next.get() + GRID_FRAME_BATCH).min(images.len());
+                while next.get() < end {
+                    let idx = next.get();
+                    let card =
+                        Self::create_thumbnail_card(&state, &images[idx], &images, idx, ar, ag, ab);
+                    flow.append(&card);
+                    next.set(idx + 1);
+                    // Leave most of the frame budget for layout and rendering.
+                    if started.elapsed() >= std::time::Duration::from_millis(2) {
+                        break;
+                    }
+                }
+                if next.get() == images.len() {
+                    glib::ControlFlow::Break
+                } else {
+                    glib::ControlFlow::Continue
+                }
+            });
         }
 
         grid_scroll.set_child(Some(&flow));
@@ -309,15 +355,17 @@ impl HomeScreen {
             self.albums_box.set_margin_bottom(40);
         }
 
+        let animate = animate && self.container.settings().is_gtk_enable_animations();
         let rows = self.state.borrow().album_rows.clone();
         for row in rows {
             let is_this_expanded = expanded_dir_opt.as_ref() == Some(&row.dir);
 
-            let dur_revealer = if animate { 250 } else { 0 };
-            let dur_stack = if animate { 140 } else { 0 };
-
-            row.revealer.set_transition_duration(dur_revealer);
-            row.content_stack.set_transition_duration(dur_stack);
+            // A single ease-out height transition clips the closing strips and
+            // lets the selected album grow into the freed space. `None` hides
+            // content but still reserves its height, leaving empty album cards.
+            row.revealer
+                .set_transition_duration(if animate { ALBUM_EXPAND_MS } else { 0 });
+            row.content_stack.set_transition_duration(0);
 
             if is_this_expanded {
                 self.ensure_album_grid(&row);
@@ -552,13 +600,13 @@ impl HomeScreen {
             // Content Revealer + Stack
             let revealer = Revealer::new();
             revealer.set_transition_type(RevealerTransitionType::SlideDown);
-            revealer.set_transition_duration(250);
+            revealer.set_transition_duration(0);
             revealer.set_reveal_child(true);
             revealer.add_css_class("album-revealer");
 
             let content_stack = Stack::new();
-            content_stack.set_transition_type(StackTransitionType::Crossfade);
-            content_stack.set_transition_duration(140);
+            content_stack.set_transition_type(StackTransitionType::None);
+            content_stack.set_transition_duration(0);
             content_stack.set_interpolate_size(false);
             content_stack.add_css_class("album-content-stack");
 
@@ -584,7 +632,15 @@ impl HomeScreen {
                 strip_box.set_margin_end(4);
 
                 for (idx, img_path) in images.iter().enumerate() {
-                    let card = self.create_thumbnail_card(img_path, &images, idx, ar, ag, ab);
+                    let card = Self::create_thumbnail_card(
+                        &self.state,
+                        img_path,
+                        &images,
+                        idx,
+                        ar,
+                        ag,
+                        ab,
+                    );
                     strip_box.append(&card);
                 }
                 strip_scroll.set_child(Some(&strip_box));
@@ -616,7 +672,7 @@ impl HomeScreen {
     }
 
     fn create_thumbnail_card(
-        &self,
+        state: &Rc<RefCell<HomeScreenState>>,
         img_path: &Path,
         all_images: &Rc<Vec<PathBuf>>,
         idx: usize,
@@ -634,9 +690,9 @@ impl HomeScreen {
         area.set_content_height(CARD_HEIGHT as i32);
         area.add_css_class("album-card-image");
 
-        let state_card = self.state.clone();
+        let state_card = state.clone();
         let path_clone = img_path.to_path_buf();
-        self.state
+        state
             .borrow_mut()
             .thumb_areas
             .entry(path_clone.clone())
@@ -785,7 +841,7 @@ impl HomeScreen {
         // Click gesture on card
         let click = GestureClick::new();
         let images_for_click = all_images.clone();
-        let state_click = self.state.clone();
+        let state_click = state.clone();
         click.connect_pressed(move |_, _, _, _| {
             let cb_opt = state_click.borrow().on_open_image.clone();
             if let Some(cb) = cb_opt {
@@ -814,6 +870,66 @@ mod tests {
         let cache = ImageCache::new(2, 10);
         let colors = OmarchyColors::default();
         let home = HomeScreen::new(cache, colors);
+        let test_dir = std::env::temp_dir().join(format!("omaview-expand-{}", std::process::id()));
+        // Use an isolated album, independent of the user's saved album list.
+        while let Some(child) = home.albums_box.first_child() {
+            home.albums_box.remove(&child);
+        }
+        let section = GtkBox::new(Orientation::Vertical, 8);
+        let header = GtkBox::new(Orientation::Horizontal, 10);
+        let revealer = Revealer::new();
+        revealer.set_transition_type(RevealerTransitionType::SlideDown);
+        let stack = Stack::new();
+        stack.set_transition_type(StackTransitionType::None);
+        stack.set_interpolate_size(false);
+        stack.add_named(&GtkBox::new(Orientation::Horizontal, 0), Some("strip"));
+        revealer.set_child(Some(&stack));
+        section.append(&header);
+        section.append(&revealer);
+        home.albums_box.append(&section);
+        let images = Rc::new(
+            (0..80)
+                .map(|idx| test_dir.join(format!("photo{idx}.png")))
+                .collect(),
+        );
+        let row = AlbumRow {
+            dir: test_dir.clone(),
+            images,
+            section,
+            header,
+            progress_label: Label::new(None),
+            btn_expand: Button::new(),
+            revealer,
+            content_stack: stack.clone(),
+            grid_initialized: Rc::new(RefCell::new(false)),
+        };
+        let neighbour_section = GtkBox::new(Orientation::Vertical, 8);
+        let neighbour_header = GtkBox::new(Orientation::Horizontal, 0);
+        neighbour_header.append(&Label::new(Some("Neighbour album")));
+        let neighbour_revealer = Revealer::new();
+        neighbour_revealer.set_transition_type(RevealerTransitionType::SlideDown);
+        let neighbour_stack = Stack::new();
+        let neighbour_strip = GtkBox::new(Orientation::Horizontal, 0);
+        neighbour_strip.set_height_request(162);
+        neighbour_stack.add_named(&neighbour_strip, Some("strip"));
+        neighbour_revealer.set_child(Some(&neighbour_stack));
+        neighbour_section.append(&neighbour_header);
+        neighbour_section.append(&neighbour_revealer);
+        home.albums_box.append(&neighbour_section);
+        let neighbour = AlbumRow {
+            dir: test_dir.join("neighbour"),
+            images: Rc::new(Vec::new()),
+            section: neighbour_section,
+            header: neighbour_header,
+            progress_label: Label::new(None),
+            btn_expand: Button::new(),
+            revealer: neighbour_revealer,
+            content_stack: neighbour_stack,
+            grid_initialized: Rc::new(RefCell::new(false)),
+        };
+        home.state.borrow_mut().album_rows = vec![row.clone(), neighbour.clone()];
+        home.state.borrow_mut().expanded_album = None;
+        home.apply_expansion(false);
 
         // Initially no album is expanded
         assert!(home.state.borrow().expanded_album.is_none());
@@ -821,9 +937,7 @@ mod tests {
         assert_eq!(home.scrolled.vscrollbar_policy(), PolicyType::Automatic);
 
         // Expand an album
-        let test_dir = PathBuf::from("/home/sr/Pictures");
-        home.state.borrow_mut().expanded_album = Some(test_dir.clone());
-        home.refresh();
+        home.expand_album(test_dir.clone());
 
         assert_eq!(home.state.borrow().expanded_album, Some(test_dir.clone()));
         // When expanded, outside scrollbar must be disabled
@@ -853,14 +967,118 @@ mod tests {
         };
         assert_eq!(flow.valign(), gtk4::Align::Start);
         assert!(!flow.vexpands());
+        assert!(flow.child_at_index(0).is_some());
+        assert!(
+            flow.child_at_index(GRID_FIRST_BATCH as i32).is_none(),
+            "the click must not synchronously build the entire album"
+        );
+        let expected_duration = if home.widget().settings().is_gtk_enable_animations() {
+            ALBUM_EXPAND_MS
+        } else {
+            0
+        };
+        assert_eq!(row.revealer.transition_duration(), expected_duration);
 
         // Now collapse the album
         home.state.borrow_mut().expanded_album = None;
-        home.refresh();
+        home.apply_expansion(false);
 
         assert!(home.state.borrow().expanded_album.is_none());
         assert_eq!(home.scrolled.vscrollbar_policy(), PolicyType::Automatic);
         assert!(!home.albums_box.vexpands());
+
+        let test_window = Window::builder()
+            .title("Omaview expansion regression")
+            .build();
+        test_window.set_default_size(800, 600);
+        test_window.set_child(Some(home.widget()));
+        test_window.present();
+        fn pump_until(condition: impl Fn() -> bool) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !condition() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "album expansion timed out"
+                );
+                glib::MainContext::default().iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        pump_until(|| home.widget().is_mapped());
+        // Hidden grids pause their work; reopening resumes the same grid.
+        assert!(flow.child_at_index(GRID_FIRST_BATCH as i32).is_none());
+        let settings = home.widget().settings();
+        let animations_enabled = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(false);
+        home.expand_album(test_dir.clone());
+        assert_eq!(stack.transition_duration(), 0);
+        pump_until(|| flow.child_at_index(79).is_some() && neighbour.revealer.height() == 0);
+        assert!(
+            neighbour.section.height() < 100,
+            "other albums must occupy only a compact header row"
+        );
+        assert!(row.section.height() > neighbour.section.height() * 2);
+        assert!(flow.child_at_index(80).is_none());
+        for idx in 0..80 {
+            let card = flow.child_at_index(idx).unwrap().child().unwrap();
+            let label = card.last_child().unwrap().downcast::<Label>().unwrap();
+            assert_eq!(label.text(), format!("photo{idx}.png"));
+        }
+        let opened = Rc::new(RefCell::new(None));
+        let opened_cb = opened.clone();
+        home.connect_open_image(move |paths, idx| *opened_cb.borrow_mut() = Some((paths, idx)));
+        let last_card = flow.child_at_index(79).unwrap().child().unwrap();
+        let controllers = last_card.observe_controllers();
+        let click = (0..controllers.n_items())
+            .find_map(|idx| controllers.item(idx)?.downcast::<GestureClick>().ok())
+            .unwrap();
+        click.emit_by_name::<()>("pressed", &[&1i32, &0.0f64, &0.0f64]);
+        assert_eq!(*opened.borrow(), Some((row.images.as_ref().clone(), 79)));
+        home.state.borrow_mut().expanded_album = None;
+        home.apply_expansion(false);
+        pump_until(|| neighbour.revealer.height() >= 162);
+        settings.set_gtk_enable_animations(true);
+        let heights = Rc::new(RefCell::new(Vec::new()));
+        let heights_tick = heights.clone();
+        let revealer_weak = neighbour.revealer.downgrade();
+        neighbour.header.add_tick_callback(move |_, _| {
+            let Some(revealer) = revealer_weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let height = revealer.height();
+            heights_tick.borrow_mut().push(height);
+            if height == 0 {
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+        home.expand_album(test_dir.clone());
+        assert_eq!(row.revealer.transition_duration(), ALBUM_EXPAND_MS);
+        assert_eq!(stack.transition_duration(), 0);
+        pump_until(|| !neighbour.revealer.is_child_revealed() && neighbour.revealer.height() == 0);
+        assert!(
+            heights
+                .borrow()
+                .iter()
+                .filter(|&&h| h > 0 && h < 162)
+                .count()
+                >= 2,
+            "collapse should pass through intermediate heights instead of snapping"
+        );
+        // Interrupt and reverse a transition; neighbours must regain their strip height.
+        home.state.borrow_mut().expanded_album = None;
+        home.apply_expansion(true);
+        home.expand_album(test_dir.clone());
+        home.state.borrow_mut().expanded_album = None;
+        home.apply_expansion(true);
+        pump_until(|| neighbour.revealer.is_child_revealed() && neighbour.revealer.height() >= 162);
+        assert!(
+            flow.child_at_index(80).is_none(),
+            "reopening must not duplicate cards"
+        );
+        settings.set_gtk_enable_animations(animations_enabled);
+        test_window.close();
 
         // Test thumbnail card badge overlay logic
         let temp_dir =
@@ -870,7 +1088,8 @@ mod tests {
         // 1. Regular non-raw image
         let png_path = temp_dir.join("image.png");
         let _ = std::fs::write(&png_path, b"png");
-        let card_png = home.create_thumbnail_card(
+        let card_png = HomeScreen::create_thumbnail_card(
+            &home.state,
             &png_path,
             &Rc::new(vec![png_path.clone()]),
             0,
@@ -885,7 +1104,8 @@ mod tests {
         // 2. Standalone RAW image
         let raw_path = temp_dir.join("photo.arw");
         let _ = std::fs::write(&raw_path, b"raw");
-        let card_raw = home.create_thumbnail_card(
+        let card_raw = HomeScreen::create_thumbnail_card(
+            &home.state,
             &raw_path,
             &Rc::new(vec![raw_path.clone()]),
             0,
@@ -916,7 +1136,8 @@ mod tests {
         let jpg_path = temp_dir.join("photo2.jpg");
         let _ = std::fs::write(&cr3_path, b"raw");
         let _ = std::fs::write(&jpg_path, b"jpg");
-        let card_companion = home.create_thumbnail_card(
+        let card_companion = HomeScreen::create_thumbnail_card(
+            &home.state,
             &cr3_path,
             &Rc::new(vec![cr3_path.clone()]),
             0,

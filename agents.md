@@ -131,3 +131,8 @@ win_clone.go_to_index(current_idx);
 
 ## 7. Logging & Documentation
 - Always record completed phases, bugfixes, and visual verifications in `work_done.md`.
+
+## 8. Release Conventions
+- Use annotated `vMAJOR.MINOR.PATCH` tags, matching the existing release convention.
+- For every release, update `Cargo.toml`, the Omaview entry in `Cargo.lock`, and `PKGBUILD` together.
+- Always update the README release badge link, latest-release label, archive links, and checksum links to the new release tag. Ensure every linked asset is uploaded by `.github/workflows/release.yml`.
