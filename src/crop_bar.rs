@@ -1,8 +1,9 @@
+use crate::util::Callback;
+use crate::viewport::CropRatio;
 use gtk4::prelude::*;
 use gtk4::{Box as GtkBox, Button, Image, Label, Orientation, Separator};
 use std::cell::RefCell;
 use std::rc::Rc;
-use crate::viewport::CropRatio;
 
 #[derive(Clone)]
 pub struct CropBar {
@@ -13,9 +14,9 @@ pub struct CropBar {
     btn_apply: Button,
     btn_cancel: Button,
     active_ratio: Rc<RefCell<CropRatio>>,
-    on_ratio_selected: Rc<RefCell<Option<Box<dyn Fn(CropRatio) + 'static>>>>,
-    on_apply: Rc<RefCell<Option<Box<dyn Fn() + 'static>>>>,
-    on_cancel: Rc<RefCell<Option<Box<dyn Fn() + 'static>>>>,
+    on_ratio_selected: Callback<dyn Fn(CropRatio)>,
+    on_apply: Callback<dyn Fn()>,
+    on_cancel: Callback<dyn Fn()>,
 }
 
 impl CropBar {

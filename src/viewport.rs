@@ -1,9 +1,13 @@
-use std::cell::RefCell;
+use crate::util::Callback;
+use gtk4::prelude::*;
+use gtk4::{
+    DrawingArea, DropTarget, EventControllerScroll, EventControllerScrollFlags, GestureClick,
+    GestureDrag,
+};
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use gtk4::prelude::*;
-use gtk4::{DrawingArea, GestureClick, GestureDrag, EventControllerScroll, EventControllerScrollFlags, DropTarget};
 
 use crate::image_loader::{DecodedImage, rgba_to_cairo_surface};
 use crate::image_ops::{ImageEdits, apply_all_edits};
@@ -45,13 +49,13 @@ enum CropHandle {
 pub struct ViewportState {
     pub image: Option<Arc<DecodedImage>>,
     pub rendered_surface: Option<cairo::ImageSurface>,
-    pub surface_cache: std::collections::HashMap<PathBuf, (cairo::ImageSurface, u32, u32)>,
     pub rendered_width: u32,
     pub rendered_height: u32,
 
     pub edits: ImageEdits,
 
     pub zoom: f64,
+    display_zoom: f64,
     pub is_fit: bool,
     pub pan_x: f64,
     pub pan_y: f64,
@@ -72,9 +76,11 @@ pub struct ViewportState {
 pub struct Viewport {
     area: DrawingArea,
     state: Rc<RefCell<ViewportState>>,
-    on_zoom_changed: Rc<RefCell<Option<Box<dyn Fn(u32) + 'static>>>>,
-    on_crop_applied: Rc<RefCell<Option<Box<dyn Fn() + 'static>>>>,
-    on_drop_files: Rc<RefCell<Option<Box<dyn Fn(Vec<PathBuf>) + 'static>>>>,
+    on_zoom_changed: Callback<dyn Fn(u32)>,
+    on_crop_applied: Callback<dyn Fn()>,
+    on_drop_files: Callback<dyn Fn(Vec<PathBuf>)>,
+    rendering: Rc<Cell<bool>>,
+    zoom_animating: Rc<Cell<bool>>,
 }
 
 fn draw_rounded_rect(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
@@ -82,9 +88,55 @@ fn draw_rounded_rect(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64
     cr.new_sub_path();
     cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
     cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
-    cr.arc(x + r, y + h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
-    cr.arc(x + r, y + r, r, std::f64::consts::PI, 3.0 * std::f64::consts::FRAC_PI_2);
+    cr.arc(
+        x + r,
+        y + h - r,
+        r,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+    );
+    cr.arc(
+        x + r,
+        y + r,
+        r,
+        std::f64::consts::PI,
+        3.0 * std::f64::consts::FRAC_PI_2,
+    );
     cr.close_path();
+}
+
+fn start_zoom_animation(
+    area: &DrawingArea,
+    state: Rc<RefCell<ViewportState>>,
+    animating: Rc<Cell<bool>>,
+) {
+    if animating.replace(true) {
+        return;
+    }
+    let last_frame = Cell::new(None);
+    area.add_tick_callback(move |area, clock| {
+        let now = clock.frame_time();
+        let dt = last_frame
+            .get()
+            .map_or(1.0 / 60.0, |last| (now - last) as f64 / 1_000_000.0);
+        last_frame.set(Some(now));
+        let mut s = state.borrow_mut();
+        s.display_zoom += (s.zoom - s.display_zoom) * (1.0 - (-dt / 0.035).exp());
+        let done = s.is_fit
+            || !area.settings().is_gtk_enable_animations()
+            || (s.zoom - s.display_zoom).abs() < s.zoom * 0.001;
+        if done {
+            s.display_zoom = s.zoom;
+            animating.set(false);
+        }
+        drop(s);
+        area.queue_draw();
+        if done {
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
 }
 
 impl Viewport {
@@ -97,11 +149,11 @@ impl Viewport {
         let state = Rc::new(RefCell::new(ViewportState {
             image: None,
             rendered_surface: None,
-            surface_cache: std::collections::HashMap::new(),
             rendered_width: 0,
             rendered_height: 0,
             edits: ImageEdits::default(),
             zoom: 1.0,
+            display_zoom: 1.0,
             is_fit: true,
             pan_x: 0.0,
             pan_y: 0.0,
@@ -117,6 +169,32 @@ impl Viewport {
         let on_zoom_changed = Rc::new(RefCell::new(None::<Box<dyn Fn(u32) + 'static>>));
         let on_crop_applied = Rc::new(RefCell::new(None::<Box<dyn Fn() + 'static>>));
         let on_drop_files = Rc::new(RefCell::new(None::<Box<dyn Fn(Vec<PathBuf>) + 'static>>));
+        let rendering = Rc::new(Cell::new(false));
+        let zoom_animating = Rc::new(Cell::new(false));
+
+        let resize_state = state.clone();
+        let resize_zoom_cb = on_zoom_changed.clone();
+        area.connect_resize(move |_, width, height| {
+            let zoom_pct = {
+                let mut s = resize_state.borrow_mut();
+                if width <= 0
+                    || height <= 0
+                    || !s.is_fit
+                    || s.rendered_width == 0
+                    || s.rendered_height == 0
+                {
+                    return;
+                }
+                s.zoom = (width as f64 / s.rendered_width as f64)
+                    .min(height as f64 / s.rendered_height as f64)
+                    .min(1.0);
+                s.display_zoom = s.zoom;
+                (s.zoom * 100.0).round() as u32
+            };
+            if let Some(ref callback) = *resize_zoom_cb.borrow() {
+                callback(zoom_pct);
+            }
+        });
 
         // 1. Draw function
         let state_draw = state.clone();
@@ -126,11 +204,18 @@ impl Viewport {
                 Some(surf) => surf,
                 None => {
                     cr.set_source_rgba(1.0, 1.0, 1.0, 0.35);
-                    cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+                    cr.select_font_face(
+                        "sans-serif",
+                        cairo::FontSlant::Normal,
+                        cairo::FontWeight::Normal,
+                    );
                     cr.set_font_size(15.0);
                     let text = "Open an image or drag & drop files here";
                     if let Ok(ext) = cr.text_extents(text) {
-                        cr.move_to((width as f64 - ext.width()) / 2.0, (height as f64 + ext.height()) / 2.0);
+                        cr.move_to(
+                            (width as f64 - ext.width()) / 2.0,
+                            (height as f64 + ext.height()) / 2.0,
+                        );
                         let _ = cr.show_text(text);
                     }
                     return;
@@ -145,12 +230,13 @@ impl Viewport {
             if s.is_fit {
                 let fit_scale = (vw / iw).min(vh / ih);
                 s.zoom = if iw <= vw && ih <= vh { 1.0 } else { fit_scale };
+                s.display_zoom = s.zoom;
                 s.pan_x = 0.0;
                 s.pan_y = 0.0;
             }
 
-            let dw = iw * s.zoom;
-            let dh = ih * s.zoom;
+            let dw = iw * s.display_zoom;
+            let dh = ih * s.display_zoom;
             let origin_x = (vw - dw) / 2.0 + s.pan_x;
             let origin_y = (vh - dh) / 2.0 + s.pan_y;
 
@@ -166,7 +252,7 @@ impl Viewport {
             draw_rounded_rect(cr, origin_x, origin_y, dw, dh, 12.0);
             cr.clip();
             cr.translate(origin_x, origin_y);
-            cr.scale(s.zoom, s.zoom);
+            cr.scale(s.display_zoom, s.display_zoom);
 
             let pattern = cairo::SurfacePattern::create(&surface);
             pattern.set_filter(cairo::Filter::Bilinear);
@@ -230,7 +316,12 @@ impl Viewport {
                 cr.set_dash(&[], 0.0);
                 cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
                 let draw_handle = |cr: &cairo::Context, hx: f64, hy: f64| {
-                    cr.rectangle(hx - handle_sz / 2.0, hy - handle_sz / 2.0, handle_sz, handle_sz);
+                    cr.rectangle(
+                        hx - handle_sz / 2.0,
+                        hy - handle_sz / 2.0,
+                        handle_sz,
+                        handle_sz,
+                    );
                     let _ = cr.fill();
                 };
 
@@ -256,12 +347,20 @@ impl Viewport {
         drag_gesture.connect_drag_begin(move |_, start_x, start_y| {
             let mut s = state_drag.borrow_mut();
             if s.crop_mode {
-                let area_w = if let Some(a) = area_weak_drag.upgrade() { a.width() as f64 } else { 0.0 };
-                let area_h = if let Some(a) = area_weak_drag.upgrade() { a.height() as f64 } else { 0.0 };
+                let area_w = if let Some(a) = area_weak_drag.upgrade() {
+                    a.width() as f64
+                } else {
+                    0.0
+                };
+                let area_h = if let Some(a) = area_weak_drag.upgrade() {
+                    a.height() as f64
+                } else {
+                    0.0
+                };
                 let iw = s.rendered_width as f64;
                 let ih = s.rendered_height as f64;
-                let dw = iw * s.zoom;
-                let dh = ih * s.zoom;
+                let dw = iw * s.display_zoom;
+                let dh = ih * s.display_zoom;
                 let origin_x = (area_w - dw) / 2.0 + s.pan_x;
                 let origin_y = (area_h - dh) / 2.0 + s.pan_y;
 
@@ -272,27 +371,50 @@ impl Viewport {
                 let crop_h = ch * dh;
 
                 let thresh = 14.0;
-                let handle = if (start_x - crop_x).abs() < thresh && (start_y - crop_y).abs() < thresh {
-                    CropHandle::TopLeft
-                } else if (start_x - (crop_x + crop_w)).abs() < thresh && (start_y - crop_y).abs() < thresh {
-                    CropHandle::TopRight
-                } else if (start_x - crop_x).abs() < thresh && (start_y - (crop_y + crop_h)).abs() < thresh {
-                    CropHandle::BottomLeft
-                } else if (start_x - (crop_x + crop_w)).abs() < thresh && (start_y - (crop_y + crop_h)).abs() < thresh {
-                    CropHandle::BottomRight
-                } else if (start_y - crop_y).abs() < thresh && start_x >= crop_x && start_x <= crop_x + crop_w {
-                    CropHandle::Top
-                } else if (start_y - (crop_y + crop_h)).abs() < thresh && start_x >= crop_x && start_x <= crop_x + crop_w {
-                    CropHandle::Bottom
-                } else if (start_x - crop_x).abs() < thresh && start_y >= crop_y && start_y <= crop_y + crop_h {
-                    CropHandle::Left
-                } else if (start_x - (crop_x + crop_w)).abs() < thresh && start_y >= crop_y && start_y <= crop_y + crop_h {
-                    CropHandle::Right
-                } else if start_x >= crop_x && start_x <= crop_x + crop_w && start_y >= crop_y && start_y <= crop_y + crop_h {
-                    CropHandle::Inside
-                } else {
-                    CropHandle::None
-                };
+                let handle =
+                    if (start_x - crop_x).abs() < thresh && (start_y - crop_y).abs() < thresh {
+                        CropHandle::TopLeft
+                    } else if (start_x - (crop_x + crop_w)).abs() < thresh
+                        && (start_y - crop_y).abs() < thresh
+                    {
+                        CropHandle::TopRight
+                    } else if (start_x - crop_x).abs() < thresh
+                        && (start_y - (crop_y + crop_h)).abs() < thresh
+                    {
+                        CropHandle::BottomLeft
+                    } else if (start_x - (crop_x + crop_w)).abs() < thresh
+                        && (start_y - (crop_y + crop_h)).abs() < thresh
+                    {
+                        CropHandle::BottomRight
+                    } else if (start_y - crop_y).abs() < thresh
+                        && start_x >= crop_x
+                        && start_x <= crop_x + crop_w
+                    {
+                        CropHandle::Top
+                    } else if (start_y - (crop_y + crop_h)).abs() < thresh
+                        && start_x >= crop_x
+                        && start_x <= crop_x + crop_w
+                    {
+                        CropHandle::Bottom
+                    } else if (start_x - crop_x).abs() < thresh
+                        && start_y >= crop_y
+                        && start_y <= crop_y + crop_h
+                    {
+                        CropHandle::Left
+                    } else if (start_x - (crop_x + crop_w)).abs() < thresh
+                        && start_y >= crop_y
+                        && start_y <= crop_y + crop_h
+                    {
+                        CropHandle::Right
+                    } else if start_x >= crop_x
+                        && start_x <= crop_x + crop_w
+                        && start_y >= crop_y
+                        && start_y <= crop_y + crop_h
+                    {
+                        CropHandle::Inside
+                    } else {
+                        CropHandle::None
+                    };
 
                 s.crop_active_handle = handle;
                 s.crop_drag_start_rect = s.crop_rect;
@@ -309,8 +431,8 @@ impl Viewport {
             if s.crop_mode {
                 let iw = s.rendered_width as f64;
                 let ih = s.rendered_height as f64;
-                let dw = iw * s.zoom;
-                let dh = ih * s.zoom;
+                let dw = iw * s.display_zoom;
+                let dh = ih * s.display_zoom;
                 if dw <= 0.0 || dh <= 0.0 {
                     return;
                 }
@@ -318,11 +440,13 @@ impl Viewport {
                 let ndx = offset_x / dw;
                 let ndy = offset_y / dh;
                 let [ox, oy, ow, oh] = s.crop_drag_start_rect;
+                let min_w = 0.05f64.min(ow);
+                let min_h = 0.05f64.min(oh);
 
                 if let Some(target_ratio) = s.crop_ratio.ratio() {
                     let img_w = s.rendered_width.max(1) as f64;
                     let img_h = s.rendered_height.max(1) as f64;
-                    let norm_ratio = (target_ratio / (img_w / img_h)).max(0.01);
+                    let norm_ratio = target_ratio / (img_w / img_h);
 
                     match s.crop_active_handle {
                         CropHandle::Inside => {
@@ -332,19 +456,19 @@ impl Viewport {
                             s.crop_rect[1] = ny;
                         }
                         CropHandle::BottomRight => {
-                            let mut nw = (ow + ndx).clamp(0.05, 1.0 - ox);
+                            let mut nw = (ow + ndx).clamp(min_w, 1.0 - ox);
                             let mut nh = nw / norm_ratio;
                             if oy + nh > 1.0 {
                                 nh = 1.0 - oy;
                                 nw = (nh * norm_ratio).min(1.0 - ox);
                             }
-                            s.crop_rect[2] = nw.max(0.05);
-                            s.crop_rect[3] = nh.max(0.05);
+                            s.crop_rect[2] = nw.max(min_w);
+                            s.crop_rect[3] = nh.max(min_h);
                         }
                         CropHandle::TopLeft => {
                             let max_w = ox + ow;
                             let max_h = oy + oh;
-                            let mut nw = (ow - ndx).clamp(0.05, max_w);
+                            let mut nw = (ow - ndx).clamp(min_w, max_w);
                             let mut nh = nw / norm_ratio;
                             if nh > max_h {
                                 nh = max_h;
@@ -352,37 +476,42 @@ impl Viewport {
                             }
                             s.crop_rect[0] = ox + ow - nw;
                             s.crop_rect[1] = oy + oh - nh;
-                            s.crop_rect[2] = nw.max(0.05);
-                            s.crop_rect[3] = nh.max(0.05);
+                            s.crop_rect[2] = nw.max(min_w);
+                            s.crop_rect[3] = nh.max(min_h);
                         }
                         CropHandle::TopRight => {
                             let max_h = oy + oh;
-                            let mut nw = (ow + ndx).clamp(0.05, 1.0 - ox);
+                            let mut nw = (ow + ndx).clamp(min_w, 1.0 - ox);
                             let mut nh = nw / norm_ratio;
                             if nh > max_h {
                                 nh = max_h;
                                 nw = (nh * norm_ratio).min(1.0 - ox);
                             }
                             s.crop_rect[1] = oy + oh - nh;
-                            s.crop_rect[2] = nw.max(0.05);
-                            s.crop_rect[3] = nh.max(0.05);
+                            s.crop_rect[2] = nw.max(min_w);
+                            s.crop_rect[3] = nh.max(min_h);
                         }
                         CropHandle::BottomLeft => {
                             let max_w = ox + ow;
-                            let mut nw = (ow - ndx).clamp(0.05, max_w);
+                            let mut nw = (ow - ndx).clamp(min_w, max_w);
                             let mut nh = nw / norm_ratio;
                             if oy + nh > 1.0 {
                                 nh = 1.0 - oy;
                                 nw = (nh * norm_ratio).min(max_w);
                             }
                             s.crop_rect[0] = ox + ow - nw;
-                            s.crop_rect[2] = nw.max(0.05);
-                            s.crop_rect[3] = nh.max(0.05);
+                            s.crop_rect[2] = nw.max(min_w);
+                            s.crop_rect[3] = nh.max(min_h);
                         }
                         CropHandle::Right | CropHandle::Left => {
-                            let sign = if s.crop_active_handle == CropHandle::Right { 1.0 } else { -1.0 };
-                            let mut nw = (ow + sign * ndx).clamp(0.05, if sign > 0.0 { 1.0 - ox } else { ox + ow });
-                            let nh = (nw / norm_ratio).clamp(0.05, 1.0);
+                            let sign = if s.crop_active_handle == CropHandle::Right {
+                                1.0
+                            } else {
+                                -1.0
+                            };
+                            let mut nw = (ow + sign * ndx)
+                                .clamp(min_w, if sign > 0.0 { 1.0 - ox } else { ox + ow });
+                            let nh = (nw / norm_ratio).clamp(min_h, 1.0);
                             nw = nh * norm_ratio;
                             let cy_center = oy + oh / 2.0;
                             let ny = (cy_center - nh / 2.0).clamp(0.0, 1.0 - nh);
@@ -394,9 +523,14 @@ impl Viewport {
                             s.crop_rect[3] = nh;
                         }
                         CropHandle::Bottom | CropHandle::Top => {
-                            let sign = if s.crop_active_handle == CropHandle::Bottom { 1.0 } else { -1.0 };
-                            let mut nh = (oh + sign * ndy).clamp(0.05, if sign > 0.0 { 1.0 - oy } else { oy + oh });
-                            let nw = (nh * norm_ratio).clamp(0.05, 1.0);
+                            let sign = if s.crop_active_handle == CropHandle::Bottom {
+                                1.0
+                            } else {
+                                -1.0
+                            };
+                            let mut nh = (oh + sign * ndy)
+                                .clamp(min_h, if sign > 0.0 { 1.0 - oy } else { oy + oh });
+                            let nw = (nh * norm_ratio).clamp(min_w, 1.0);
                             nh = nw / norm_ratio;
                             let cx_center = ox + ow / 2.0;
                             let nx = (cx_center - nw / 2.0).clamp(0.0, 1.0 - nw);
@@ -418,49 +552,49 @@ impl Viewport {
                             s.crop_rect[1] = ny;
                         }
                         CropHandle::TopLeft => {
-                            let nx = (ox + ndx).clamp(0.0, ox + ow - 0.05);
-                            let ny = (oy + ndy).clamp(0.0, oy + oh - 0.05);
+                            let nx = (ox + ndx).clamp(0.0, ox + ow - min_w);
+                            let ny = (oy + ndy).clamp(0.0, oy + oh - min_h);
                             s.crop_rect[0] = nx;
                             s.crop_rect[1] = ny;
                             s.crop_rect[2] = (ox + ow) - nx;
                             s.crop_rect[3] = (oy + oh) - ny;
                         }
                         CropHandle::TopRight => {
-                            let ny = (oy + ndy).clamp(0.0, oy + oh - 0.05);
-                            let nw = (ow + ndx).clamp(0.05, 1.0 - ox);
+                            let ny = (oy + ndy).clamp(0.0, oy + oh - min_h);
+                            let nw = (ow + ndx).clamp(min_w, 1.0 - ox);
                             s.crop_rect[1] = ny;
                             s.crop_rect[2] = nw;
                             s.crop_rect[3] = (oy + oh) - ny;
                         }
                         CropHandle::BottomLeft => {
-                            let nx = (ox + ndx).clamp(0.0, ox + ow - 0.05);
-                            let nh = (oh + ndy).clamp(0.05, 1.0 - oy);
+                            let nx = (ox + ndx).clamp(0.0, ox + ow - min_w);
+                            let nh = (oh + ndy).clamp(min_h, 1.0 - oy);
                             s.crop_rect[0] = nx;
                             s.crop_rect[2] = (ox + ow) - nx;
                             s.crop_rect[3] = nh;
                         }
                         CropHandle::BottomRight => {
-                            let nw = (ow + ndx).clamp(0.05, 1.0 - ox);
-                            let nh = (oh + ndy).clamp(0.05, 1.0 - oy);
+                            let nw = (ow + ndx).clamp(min_w, 1.0 - ox);
+                            let nh = (oh + ndy).clamp(min_h, 1.0 - oy);
                             s.crop_rect[2] = nw;
                             s.crop_rect[3] = nh;
                         }
                         CropHandle::Top => {
-                            let ny = (oy + ndy).clamp(0.0, oy + oh - 0.05);
+                            let ny = (oy + ndy).clamp(0.0, oy + oh - min_h);
                             s.crop_rect[1] = ny;
                             s.crop_rect[3] = (oy + oh) - ny;
                         }
                         CropHandle::Bottom => {
-                            let nh = (oh + ndy).clamp(0.05, 1.0 - oy);
+                            let nh = (oh + ndy).clamp(min_h, 1.0 - oy);
                             s.crop_rect[3] = nh;
                         }
                         CropHandle::Left => {
-                            let nx = (ox + ndx).clamp(0.0, ox + ow - 0.05);
+                            let nx = (ox + ndx).clamp(0.0, ox + ow - min_w);
                             s.crop_rect[0] = nx;
                             s.crop_rect[2] = (ox + ow) - nx;
                         }
                         CropHandle::Right => {
-                            let nw = (ow + ndx).clamp(0.05, 1.0 - ox);
+                            let nw = (ow + ndx).clamp(min_w, 1.0 - ox);
                             s.crop_rect[2] = nw;
                         }
                         CropHandle::None => {}
@@ -483,17 +617,25 @@ impl Viewport {
         let state_click = state.clone();
         let area_weak_click = area.downgrade();
         let zoom_cb_click = on_zoom_changed.clone();
+        let crop_cb_click = on_crop_applied.clone();
+        let drop_cb_click = on_drop_files.clone();
+        let rendering_click = rendering.clone();
+        let zoom_animating_click = zoom_animating.clone();
         click_gesture.connect_pressed(move |_, n_press, _, _| {
             if n_press == 2 {
                 let is_crop = state_click.borrow().crop_mode;
                 if is_crop {
-                    let mut s = state_click.borrow_mut();
-                    let [cx, cy, cw, ch] = s.crop_rect;
-                    s.edits.crop_rect = Some([cx, cy, cw, ch]);
-                    s.crop_mode = false;
-                    drop(s);
                     if let Some(a) = area_weak_click.upgrade() {
-                        a.queue_draw();
+                        let viewport = Self {
+                            area: a,
+                            state: state_click.clone(),
+                            on_zoom_changed: zoom_cb_click.clone(),
+                            on_crop_applied: crop_cb_click.clone(),
+                            on_drop_files: drop_cb_click.clone(),
+                            rendering: rendering_click.clone(),
+                            zoom_animating: zoom_animating_click.clone(),
+                        };
+                        viewport.apply_crop();
                     }
                 } else {
                     let zoom_pct = {
@@ -505,6 +647,11 @@ impl Viewport {
                             s.pan_y = 0.0;
                         } else {
                             s.is_fit = true;
+                            if let Some(a) = area_weak_click.upgrade() {
+                                s.zoom = (a.width() as f64 / s.rendered_width.max(1) as f64)
+                                    .min(a.height() as f64 / s.rendered_height.max(1) as f64)
+                                    .min(1.0);
+                            }
                         }
                         (s.zoom * 100.0).round() as u32
                     };
@@ -512,6 +659,7 @@ impl Viewport {
                         cb(zoom_pct);
                     }
                     if let Some(a) = area_weak_click.upgrade() {
+                        start_zoom_animation(&a, state_click.clone(), zoom_animating_click.clone());
                         a.queue_draw();
                     }
                 }
@@ -524,14 +672,15 @@ impl Viewport {
         let state_scroll = state.clone();
         let area_weak_scroll = area.downgrade();
         let zoom_cb_scroll = on_zoom_changed.clone();
+        let zoom_animating_scroll = zoom_animating.clone();
         scroll_controller.connect_scroll(move |_, _, dy| {
-            if state_scroll.borrow().crop_mode {
+            if state_scroll.borrow().crop_mode || dy == 0.0 {
                 return glib::Propagation::Proceed;
             }
 
             let zoom_pct = {
                 let mut s = state_scroll.borrow_mut();
-                let factor = if dy < 0.0 { 1.15 } else { 1.0 / 1.15 };
+                let factor = 1.15f64.powf(-dy.clamp(-4.0, 4.0));
                 let new_zoom = (s.zoom * factor).clamp(0.05, 50.0);
                 s.zoom = new_zoom;
                 s.is_fit = false;
@@ -543,6 +692,7 @@ impl Viewport {
             }
 
             if let Some(a) = area_weak_scroll.upgrade() {
+                start_zoom_animation(&a, state_scroll.clone(), zoom_animating_scroll.clone());
                 a.queue_draw();
             }
 
@@ -577,6 +727,8 @@ impl Viewport {
             on_zoom_changed,
             on_crop_applied,
             on_drop_files,
+            rendering,
+            zoom_animating,
         }
     }
 
@@ -586,30 +738,21 @@ impl Viewport {
 
     pub fn set_image(&self, img: Arc<DecodedImage>) {
         let mut s = self.state.borrow_mut();
-        let (surface, w, h) = if let Some((cached_surf, cw, ch)) = s.surface_cache.get(&img.path) {
-            (Some(cached_surf.clone()), *cw, *ch)
-        } else if let Ok(surf) = crate::image_loader::cairo_data_to_surface(&img.cairo_data, img.width, img.height) {
-            if s.surface_cache.len() >= 12 {
-                s.surface_cache.clear();
-            }
-            s.surface_cache.insert(img.path.clone(), (surf.clone(), img.width, img.height));
-            (Some(surf), img.width, img.height)
-        } else if let Ok(surf) = rgba_to_cairo_surface(&img.rgba) {
-            (Some(surf), img.width, img.height)
-        } else {
-            (None, img.width, img.height)
-        };
+        let surface =
+            crate::image_loader::cairo_data_to_surface(&img.cairo_data, img.width, img.height).ok();
 
         s.image = Some(img.clone());
         s.edits = ImageEdits::default();
         s.crop_mode = false;
         s.crop_rect = [0.1, 0.1, 0.8, 0.8];
-        s.rendered_width = w;
-        s.rendered_height = h;
+        s.rendered_width = img.width;
+        s.rendered_height = img.height;
         s.rendered_surface = surface;
         s.is_fit = true;
         s.pan_x = 0.0;
         s.pan_y = 0.0;
+        s.zoom = self.fit_scale(img.width, img.height);
+        s.display_zoom = s.zoom;
         let zoom_pct = (s.zoom * 100.0).round() as u32;
         drop(s);
 
@@ -635,17 +778,64 @@ impl Viewport {
     }
 
     pub fn re_render_edits(&self) {
-        let mut s = self.state.borrow_mut();
-        if let Some(ref loaded) = s.image {
-            let processed = apply_all_edits(&loaded.image, &s.edits);
-            let rgba = processed.to_rgba8();
-            if let Ok(surface) = rgba_to_cairo_surface(&rgba) {
-                s.rendered_width = processed.width();
-                s.rendered_height = processed.height();
-                s.rendered_surface = Some(surface);
-            }
+        if self.rendering.get() {
+            return;
         }
-        self.area.queue_draw();
+        let (loaded, edits) = {
+            let s = self.state.borrow();
+            let Some(loaded) = s.image.clone() else {
+                return;
+            };
+            (loaded, s.edits.clone())
+        };
+        self.rendering.set(true);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let image = loaded.clone();
+        let job_edits = edits.clone();
+        crate::image_loader::run_background(move || {
+            let processed = apply_all_edits(&image.image, &job_edits);
+            let rgba = processed.to_rgba8();
+            let data = crate::image_loader::rgba_to_argb32_bytes(&rgba);
+            let _ = sender.send((data, processed.width(), processed.height()));
+        });
+        let viewport = self.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(8), move || {
+            match receiver.try_recv() {
+                Ok((data, width, height)) => {
+                    viewport.rendering.set(false);
+                    let is_current = viewport
+                        .state
+                        .borrow()
+                        .image
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &loaded));
+                    if is_current && viewport.get_edits() == edits {
+                        if let Ok(surface) =
+                            crate::image_loader::cairo_owned_data_to_surface(data, width, height)
+                        {
+                            let mut s = viewport.state.borrow_mut();
+                            s.rendered_width = width;
+                            s.rendered_height = height;
+                            s.rendered_surface = Some(surface);
+                            if s.is_fit {
+                                s.zoom = viewport.fit_scale(width, height);
+                            }
+                        }
+                        viewport.zoom_changed();
+                        viewport.area.queue_draw();
+                    } else if viewport.get_edits().has_any_edits() || is_current {
+                        // One job at a time, with only the latest slider values queued.
+                        viewport.re_render_edits();
+                    }
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(_) => {
+                    viewport.rendering.set(false);
+                    glib::ControlFlow::Break
+                }
+            }
+        });
     }
 
     pub fn zoom_in(&self) {
@@ -658,6 +848,7 @@ impl Viewport {
         if let Some(ref cb) = *self.on_zoom_changed.borrow() {
             cb(zoom_pct);
         }
+        start_zoom_animation(&self.area, self.state.clone(), self.zoom_animating.clone());
         self.area.queue_draw();
     }
 
@@ -671,6 +862,7 @@ impl Viewport {
         if let Some(ref cb) = *self.on_zoom_changed.borrow() {
             cb(zoom_pct);
         }
+        start_zoom_animation(&self.area, self.state.clone(), self.zoom_animating.clone());
         self.area.queue_draw();
     }
 
@@ -685,6 +877,7 @@ impl Viewport {
         if let Some(ref cb) = *self.on_zoom_changed.borrow() {
             cb(100);
         }
+        start_zoom_animation(&self.area, self.state.clone(), self.zoom_animating.clone());
         self.area.queue_draw();
     }
 
@@ -694,6 +887,8 @@ impl Viewport {
             s.is_fit = true;
             s.pan_x = 0.0;
             s.pan_y = 0.0;
+            s.zoom = self.fit_scale(s.rendered_width, s.rendered_height);
+            s.display_zoom = s.zoom;
             (s.zoom * 100.0).round() as u32
         };
         if let Some(ref cb) = *self.on_zoom_changed.borrow() {
@@ -739,6 +934,12 @@ impl Viewport {
     }
 
     pub fn toggle_crop(&self) -> bool {
+        if self.state.borrow().image.is_none() {
+            return false;
+        }
+        if self.rendering.get() && !self.state.borrow().crop_mode {
+            return false;
+        }
         let active = {
             let mut s = self.state.borrow_mut();
             s.crop_mode = !s.crop_mode;
@@ -760,7 +961,7 @@ impl Viewport {
                 let img_w = s.rendered_width.max(1) as f64;
                 let img_h = s.rendered_height.max(1) as f64;
                 let img_aspect = img_w / img_h;
-                let norm_ratio = (target_ratio / img_aspect).max(0.01);
+                let norm_ratio = target_ratio / img_aspect;
 
                 let mut cw: f64;
                 let mut ch: f64;
@@ -785,8 +986,8 @@ impl Viewport {
         {
             let mut s = self.state.borrow_mut();
             if s.crop_mode {
-                let [cx, cy, cw, ch] = s.crop_rect;
-                s.edits.crop_rect = Some([cx, cy, cw, ch]);
+                let rect = s.crop_rect;
+                s.edits.add_crop(rect);
                 s.crop_mode = false;
             }
         }
@@ -827,6 +1028,35 @@ impl Viewport {
         self.state.borrow().image.clone()
     }
 
+    /// Clear edit ownership immediately when navigation starts. A thumbnail must
+    /// never expose the previous image as the new image's editable original.
+    pub fn begin_loading(&self) {
+        let mut s = self.state.borrow_mut();
+        s.image = None;
+        s.edits = ImageEdits::default();
+        s.crop_mode = false;
+        s.rendered_surface = None;
+        s.rendered_width = 0;
+        s.rendered_height = 0;
+        drop(s);
+        self.area.queue_draw();
+    }
+
+    fn fit_scale(&self, width: u32, height: u32) -> f64 {
+        if width == 0 || height == 0 || self.area.width() <= 0 || self.area.height() <= 0 {
+            return 1.0;
+        }
+        (self.area.width() as f64 / width as f64)
+            .min(self.area.height() as f64 / height as f64)
+            .min(1.0)
+    }
+
+    fn zoom_changed(&self) {
+        if let Some(ref cb) = *self.on_zoom_changed.borrow() {
+            cb(self.get_zoom_pct());
+        }
+    }
+
     pub fn connect_zoom_changed<F: Fn(u32) + 'static>(&self, callback: F) {
         *self.on_zoom_changed.borrow_mut() = Some(Box::new(callback));
     }
@@ -851,4 +1081,3 @@ mod tests {
         assert!((CropRatio::SixteenNine.ratio().unwrap() - (16.0 / 9.0)).abs() < 1e-6);
     }
 }
-

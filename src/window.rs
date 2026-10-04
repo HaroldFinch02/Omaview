@@ -1,24 +1,27 @@
-use std::cell::RefCell;
+use gtk4::prelude::*;
+use gtk4::{
+    Box, Button, CenterBox, EventControllerMotion, Label, Orientation, Overlay, Popover, Stack,
+    StackTransitionType,
+};
+use libadwaita::ApplicationWindow;
+use libadwaita::prelude::*;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
-use gtk4::prelude::*;
-use gtk4::{Box, Button, CenterBox, EventControllerMotion, Label, Orientation, Overlay, Popover, Stack, StackTransitionType};
-use libadwaita::prelude::*;
-use libadwaita::ApplicationWindow;
 
 use crate::crop_bar::CropBar;
 use crate::filmstrip::Filmstrip;
 use crate::home::HomeScreen;
-use crate::image_loader::{ImageCache, DecodedImage, load_decoded_image};
-use crate::image_ops::{apply_all_edits, save_image};
+use crate::image_loader::{DecodedImage, ImageCache};
+use crate::image_ops::{ImageEdits, apply_all_edits, save_image};
 use crate::metadata::{MetadataPill, create_exif_popover};
 use crate::shortcuts::{AppAction, create_key_controller, show_shortcuts_dialog};
 use crate::theme::ThemeManager;
 use crate::toolbar::BottomToolbar;
-use crate::util::{trash_file, is_supported_image};
-use crate::viewport::{Viewport, CropRatio};
+use crate::util::{is_supported_image, trash_file};
+use crate::viewport::{CropRatio, Viewport};
 
 thread_local! {
     static ACTIVE_WINDOW: RefCell<Option<MainWindow>> = const { RefCell::new(None) };
@@ -30,6 +33,7 @@ pub struct WindowState {
     pub zen_mode: bool,
     pub filmstrip_visible: bool,
     pub idle_hide_pill_source: Option<glib::SourceId>,
+    pub load_generation: u64,
 }
 
 #[derive(Clone)]
@@ -53,6 +57,7 @@ pub struct MainWindow {
     state: Rc<RefCell<WindowState>>,
     raw_chooser_popover: Rc<RefCell<Option<Popover>>>,
     toast_overlay: libadwaita::ToastOverlay,
+    saving: Rc<Cell<bool>>,
 }
 
 impl MainWindow {
@@ -129,6 +134,7 @@ impl MainWindow {
             zen_mode: false,
             filmstrip_visible: true,
             idle_hide_pill_source: None,
+            load_generation: 0,
         }));
 
         // Layout:
@@ -214,6 +220,7 @@ impl MainWindow {
             state,
             raw_chooser_popover: Rc::new(RefCell::new(None)),
             toast_overlay,
+            saving: Rc::new(Cell::new(false)),
         };
 
         win.setup_controllers(&center_column);
@@ -233,9 +240,7 @@ impl MainWindow {
     fn setup_controllers(&self, container: &Box) {
         // Keyboard Controller
         let win_self = self.clone();
-        let key_controller = create_key_controller(move |action| {
-            win_self.handle_action(action)
-        });
+        let key_controller = create_key_controller(move |action| win_self.handle_action(action));
         self.window.add_controller(key_controller);
 
         // Mouse Motion Controller for nav chevrons auto-hide
@@ -344,20 +349,24 @@ impl MainWindow {
 
         // Floating Nav Chevrons
         let win_nl = self.clone();
-        self.btn_nav_left.connect_clicked(move |_| win_nl.prev_image());
+        self.btn_nav_left
+            .connect_clicked(move |_| win_nl.prev_image());
 
         let win_nr = self.clone();
-        self.btn_nav_right.connect_clicked(move |_| win_nr.next_image());
+        self.btn_nav_right
+            .connect_clicked(move |_| win_nr.next_image());
 
         // Toolbar buttons
         let win_prev = self.clone();
         self.toolbar.connect_prev(move || win_prev.prev_image());
 
         let win_grid = self.clone();
-        self.toolbar.connect_grid_toggle(move || win_grid.toggle_filmstrip());
+        self.toolbar
+            .connect_grid_toggle(move || win_grid.toggle_filmstrip());
 
         let win_zi = self.clone();
-        self.toolbar.connect_zoom_in(move || win_zi.viewport.zoom_in());
+        self.toolbar
+            .connect_zoom_in(move || win_zi.viewport.zoom_in());
 
         let win_z_ind = self.clone();
         self.toolbar.connect_zoom_indicator(move || {
@@ -370,7 +379,8 @@ impl MainWindow {
         });
 
         let win_zo = self.clone();
-        self.toolbar.connect_zoom_out(move || win_zo.viewport.zoom_out());
+        self.toolbar
+            .connect_zoom_out(move || win_zo.viewport.zoom_out());
 
         let win_crop = self.clone();
         self.toolbar.connect_crop(move || {
@@ -387,10 +397,11 @@ impl MainWindow {
         });
 
         let win_adj = self.clone();
-        self.toolbar.connect_adjustments_changed(move |exp, con, sat, warm| {
-            win_adj.viewport.update_adjustments(exp, con, sat, warm);
-            win_adj.update_save_button();
-        });
+        self.toolbar
+            .connect_adjustments_changed(move |exp, con, sat, warm| {
+                win_adj.viewport.update_adjustments(exp, con, sat, warm);
+                win_adj.update_save_button();
+            });
 
         let win_info = self.clone();
         self.toolbar.info_button().connect_clicked(move |_| {
@@ -398,7 +409,8 @@ impl MainWindow {
         });
 
         let win_trash = self.clone();
-        self.toolbar.connect_trash(move || win_trash.trash_current());
+        self.toolbar
+            .connect_trash(move || win_trash.trash_current());
 
         let win_open_raw = self.clone();
         self.toolbar.connect_open_raw(move || {
@@ -412,6 +424,9 @@ impl MainWindow {
     }
 
     pub fn handle_action(&self, action: AppAction) -> glib::Propagation {
+        if self.saving.get() {
+            return glib::Propagation::Stop;
+        }
         match action {
             AppAction::Home => self.show_home(),
             AppAction::OpenExternal => self.open_current_in_raw_editor(),
@@ -521,6 +536,11 @@ impl MainWindow {
     }
 
     pub fn load_initial_paths(&self, paths: Vec<PathBuf>, initial_index: usize) {
+        if paths.is_empty() {
+            self.show_home();
+            return;
+        }
+        let initial_index = initial_index.min(paths.len() - 1);
         {
             let mut s = self.state.borrow_mut();
             s.paths = paths.clone();
@@ -528,13 +548,12 @@ impl MainWindow {
         }
 
         self.filmstrip.set_paths(paths, initial_index);
-        self.preload_neighbors(initial_index);
         self.go_to_index(initial_index);
         self.show_viewer();
     }
 
     pub fn go_to_index(&self, index: usize) {
-        let (path, total) = {
+        let (path, total, index, generation) = {
             let mut s = self.state.borrow_mut();
             let total = s.paths.len();
             if total == 0 {
@@ -542,7 +561,8 @@ impl MainWindow {
             }
             let idx = index.min(total.saturating_sub(1));
             s.current_index = idx;
-            (s.paths[idx].clone(), total)
+            s.load_generation = s.load_generation.wrapping_add(1);
+            (s.paths[idx].clone(), total, idx, s.load_generation)
         };
 
         if self.viewport.is_in_crop_mode() {
@@ -552,6 +572,7 @@ impl MainWindow {
         }
 
         self.filmstrip.set_active_index(index);
+        self.viewport.begin_loading();
         self.toolbar.reset_adjustments_ui();
         self.update_save_button();
 
@@ -570,44 +591,41 @@ impl MainWindow {
             self.viewport.set_thumbnail_preview(&thumb);
         }
 
-        // Immediately start preloading neighbors so rapid next/prev clicks are instant
-        self.preload_neighbors(index);
-
-        // Otherwise load on background thread
-        let cache_clone = self.cache.clone();
         let path_clone = path.clone();
-
-        std::thread::spawn(move || {
-            if let Ok(loaded) = load_decoded_image(&path_clone) {
-                let arc_loaded = Arc::new(loaded);
-                cache_clone.put_image(path_clone, arc_loaded);
-
-                glib::idle_add_once(|| {
-                    ACTIVE_WINDOW.with(|cell| {
-                        if let Some(win) = cell.borrow().as_ref() {
-                            win.check_active_image();
+        self.metadata_pill.update(
+            path.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+            0,
+            0,
+            100,
+            index,
+            total,
+        );
+        self.cache.request_image(path, move |result| {
+            glib::idle_add_once(move || {
+                ACTIVE_WINDOW.with(|cell| {
+                    let win = cell.borrow().clone();
+                    if let Some(win) = win {
+                        let is_current = {
+                            let s = win.state.borrow();
+                            s.load_generation == generation
+                                && s.paths.get(s.current_index) == Some(&path_clone)
+                        };
+                        if !is_current {
+                            return;
                         }
-                    });
+                        match result {
+                            Ok(loaded) => {
+                                win.viewport.set_image(loaded.clone());
+                                win.update_metadata_pill_with(&loaded, index, total);
+                                win.update_save_button();
+                            }
+                            Err(error) => win.show_toast(&error),
+                        }
+                    }
                 });
-            }
+            });
         });
-    }
-
-    pub fn check_active_image(&self) {
-        let (path, idx, total) = {
-            let s = self.state.borrow();
-            if s.paths.is_empty() {
-                return;
-            }
-            (s.paths[s.current_index].clone(), s.current_index, s.paths.len())
-        };
-
-        if let Some(loaded) = self.cache.get_image(&path) {
-            self.viewport.set_image(loaded.clone());
-            self.update_metadata_pill_with(&loaded, idx, total);
-            self.preload_neighbors(idx);
-            self.update_save_button();
-        }
+        self.preload_neighbors(index);
     }
 
     pub fn open_current_in_raw_editor(&self) {
@@ -647,7 +665,12 @@ impl MainWindow {
         self.toast_overlay.add_toast(toast);
     }
 
-    pub fn show_toast_with_action<F: Fn() + 'static>(&self, message: &str, button_label: &str, on_click: F) {
+    pub fn show_toast_with_action<F: Fn() + 'static>(
+        &self,
+        message: &str,
+        button_label: &str,
+        on_click: F,
+    ) {
         let toast = libadwaita::Toast::new(message);
         toast.set_button_label(Some(button_label));
         toast.set_timeout(4);
@@ -690,7 +713,8 @@ impl MainWindow {
         };
 
         // Close and unparent any currently open chooser popover
-        if let Some(existing) = self.raw_chooser_popover.borrow_mut().take() {
+        let existing = self.raw_chooser_popover.borrow_mut().take();
+        if let Some(existing) = existing {
             existing.popdown();
             existing.unparent();
         }
@@ -714,10 +738,10 @@ impl MainWindow {
         popover.connect_closed(move |p| {
             p.unparent();
             let mut r = pop_ref.borrow_mut();
-            if let Some(ref current) = *r {
-                if current == p {
-                    *r = None;
-                }
+            if let Some(ref current) = *r
+                && current == p
+            {
+                *r = None;
             }
         });
 
@@ -729,7 +753,8 @@ impl MainWindow {
         let is_raw = crate::raw_loader::is_raw_image(path);
         if is_raw {
             let config = crate::external_editor::load_config();
-            let editor_name = crate::external_editor::get_preferred_editor().map(|e| e.display_name);
+            let editor_name =
+                crate::external_editor::get_preferred_editor().map(|e| e.display_name);
 
             let tip = match (editor_name, config.editor.always_launch_default) {
                 (Some(name), true) => {
@@ -767,6 +792,8 @@ impl MainWindow {
         let mut s = self.state.borrow_mut();
         s.zen_mode = !s.zen_mode;
         let zen = s.zen_mode;
+        let filmstrip_visible = s.filmstrip_visible;
+        drop(s);
 
         if zen {
             self.top_bar.set_visible(false);
@@ -779,7 +806,7 @@ impl MainWindow {
             self.bottom_bar.set_visible(true);
             self.btn_nav_left.set_visible(true);
             self.btn_nav_right.set_visible(true);
-            self.filmstrip.widget().set_visible(s.filmstrip_visible);
+            self.filmstrip.widget().set_visible(filmstrip_visible);
             self.crop_bar.set_visible(self.viewport.is_in_crop_mode());
             self.update_save_button();
         }
@@ -837,10 +864,14 @@ impl MainWindow {
     pub fn update_save_button(&self) {
         let has_edits = self.viewport.get_edits().has_any_edits();
         self.toolbar.set_save_visible(has_edits);
-        self.btn_top_save.set_visible(has_edits && !self.state.borrow().zen_mode);
+        self.btn_top_save
+            .set_visible(has_edits && !self.state.borrow().zen_mode);
     }
 
     pub fn save_current(&self) {
+        if self.saving.get() {
+            return;
+        }
         let (current_path, edits) = {
             let s = self.state.borrow();
             if s.paths.is_empty() {
@@ -858,44 +889,61 @@ impl MainWindow {
             None => return,
         };
 
+        let is_raw = crate::raw_loader::is_raw_image(&current_path);
         let dialog = libadwaita::AlertDialog::new(
             Some("Save Changes?"),
-            Some("Do you want to overwrite the original image file or save as a new copy?"),
+            Some(if is_raw {
+                "Save the edited RAW preview as a new image copy."
+            } else {
+                "Do you want to overwrite the original image file or save as a new copy?"
+            }),
         );
 
         dialog.add_response("cancel", "Cancel");
-        dialog.add_response("overwrite", "Overwrite");
+        if !is_raw {
+            dialog.add_response("overwrite", "Overwrite");
+        }
         dialog.add_response("save_as", "Save As…");
-        dialog.set_response_appearance("overwrite", libadwaita::ResponseAppearance::Destructive);
+        if !is_raw {
+            dialog
+                .set_response_appearance("overwrite", libadwaita::ResponseAppearance::Destructive);
+        }
         dialog.set_response_appearance("save_as", libadwaita::ResponseAppearance::Suggested);
-        dialog.set_default_response(Some("overwrite"));
+        dialog.set_default_response(Some(if is_raw { "save_as" } else { "overwrite" }));
         dialog.set_close_response("cancel");
 
         let win_clone = self.clone();
         let loaded_img = loaded.image.clone();
         let path_to_save = current_path.clone();
 
-        dialog.choose(Some(&self.window), gio::Cancellable::NONE, move |response| {
-            match response.as_str() {
+        dialog.choose(
+            Some(&self.window),
+            gio::Cancellable::NONE,
+            move |response| match response.as_str() {
                 "overwrite" => {
-                    let processed = apply_all_edits(&loaded_img, &edits);
-                    match save_image(&processed, &path_to_save) {
-                        Ok(()) => {
-                            win_clone.cache.remove(&path_to_save);
-                            let current_idx = win_clone.state.borrow().current_index;
-                            win_clone.go_to_index(current_idx);
-                            win_clone.update_save_button();
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to overwrite image: {}", e);
-                        }
-                    }
+                    win_clone.save_processed(
+                        loaded_img.clone(),
+                        edits.clone(),
+                        path_to_save.clone(),
+                        false,
+                    );
                 }
                 "save_as" => {
                     let file_dialog = gtk4::FileDialog::new();
                     file_dialog.set_title("Save As…");
                     if let Some(name) = path_to_save.file_name().and_then(|f| f.to_str()) {
-                        file_dialog.set_initial_name(Some(name));
+                        let name = if is_raw {
+                            format!(
+                                "{}-edited.jpg",
+                                path_to_save
+                                    .file_stem()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                            )
+                        } else {
+                            name.to_string()
+                        };
+                        file_dialog.set_initial_name(Some(&name));
                     }
                     if let Some(parent) = path_to_save.parent() {
                         file_dialog.set_initial_folder(Some(&gio::File::for_path(parent)));
@@ -903,38 +951,86 @@ impl MainWindow {
 
                     let win_save = win_clone.clone();
                     let window_for_dialog = win_save.window.clone();
-                    let processed = apply_all_edits(&loaded_img, &edits);
+                    let image_to_save = loaded_img.clone();
+                    let edits_to_save = edits.clone();
 
-                    file_dialog.save(Some(&window_for_dialog), gio::Cancellable::NONE, move |res| {
-                        if let Ok(file) = res {
-                            if let Some(dest_path) = file.path() {
-                                match save_image(&processed, &dest_path) {
-                                    Ok(()) => {
-                                        win_save.cache.remove(&dest_path);
-                                        let (new_paths, idx) = {
-                                            let mut s = win_save.state.borrow_mut();
-                                            if let Some(pos) = s.paths.iter().position(|p| p == &dest_path) {
-                                                (s.paths.clone(), pos)
-                                            } else {
-                                                s.paths.push(dest_path.clone());
-                                                let p = s.paths.clone();
-                                                let idx = p.len() - 1;
-                                                (p, idx)
-                                            }
-                                        };
-                                        win_save.load_initial_paths(new_paths, idx);
-                                        win_save.update_save_button();
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to save image copy: {}", e);
-                                    }
-                                }
+                    file_dialog.save(
+                        Some(&window_for_dialog),
+                        gio::Cancellable::NONE,
+                        move |res| {
+                            if let Ok(file) = res
+                                && let Some(dest_path) = file.path()
+                            {
+                                win_save.save_processed(
+                                    image_to_save.clone(),
+                                    edits_to_save.clone(),
+                                    dest_path,
+                                    true,
+                                );
                             }
-                        }
-                    });
+                        },
+                    );
                 }
                 _ => {}
+            },
+        );
+    }
+
+    fn save_processed(
+        &self,
+        image: Arc<image::DynamicImage>,
+        edits: ImageEdits,
+        path: PathBuf,
+        as_copy: bool,
+    ) {
+        if self.saving.replace(true) {
+            return;
+        }
+        self.stack.set_sensitive(false);
+        let generation = self.state.borrow().load_generation;
+        let dest = path.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        crate::image_loader::run_background(move || {
+            let processed = apply_all_edits(&image, &edits);
+            let _ = sender.send(save_image(&processed, &dest));
+        });
+        let win = self.clone();
+        glib::timeout_add_local(Duration::from_millis(16), move || {
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(_) => Err("Image save worker stopped".into()),
+            };
+            win.saving.set(false);
+            win.stack.set_sensitive(true);
+            match result {
+                Ok(()) => {
+                    win.cache.remove(&path);
+                    win.filmstrip.invalidate(&path);
+                    win.home_screen.invalidate(&path);
+                    if win.state.borrow().load_generation == generation {
+                        if as_copy {
+                            let (paths, idx) = {
+                                let mut s = win.state.borrow_mut();
+                                let idx = if let Some(idx) = s.paths.iter().position(|p| p == &path)
+                                {
+                                    idx
+                                } else {
+                                    s.paths.push(path.clone());
+                                    s.paths.len() - 1
+                                };
+                                (s.paths.clone(), idx)
+                            };
+                            win.load_initial_paths(paths, idx);
+                        } else {
+                            let idx = win.state.borrow().current_index;
+                            win.go_to_index(idx);
+                        }
+                    }
+                }
+                Err(error) => win.show_toast(&error),
             }
+            glib::ControlFlow::Break
         });
     }
 
@@ -944,7 +1040,10 @@ impl MainWindow {
             if s.paths.is_empty() {
                 return;
             }
-            (s.paths[s.current_index].clone(), self.viewport.get_current_image())
+            (
+                s.paths[s.current_index].clone(),
+                self.viewport.get_current_image(),
+            )
         };
 
         if let Some(loaded_img) = loaded {
@@ -955,6 +1054,7 @@ impl MainWindow {
                 &loaded_img.file_size_formatted,
             );
             popover.set_parent(self.toolbar.info_button());
+            popover.connect_closed(|p| p.unparent());
             popover.popup();
         }
     }
@@ -967,7 +1067,11 @@ impl MainWindow {
         }
 
         if let Some(loaded) = self.viewport.get_current_image() {
-            let filename = loaded.path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+            let filename = loaded
+                .path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("");
             self.metadata_pill.update(
                 filename,
                 loaded.width,
@@ -980,16 +1084,14 @@ impl MainWindow {
     }
 
     fn update_metadata_pill_with(&self, loaded: &DecodedImage, idx: usize, total: usize) {
-        let filename = loaded.path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        let filename = loaded
+            .path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("");
         let zoom_pct = self.viewport.get_zoom_pct();
-        self.metadata_pill.update(
-            filename,
-            loaded.width,
-            loaded.height,
-            zoom_pct,
-            idx,
-            total,
-        );
+        self.metadata_pill
+            .update(filename, loaded.width, loaded.height, zoom_pct, idx, total);
     }
 
     fn refresh_current_metadata(&self) {
@@ -1021,30 +1123,18 @@ impl MainWindow {
             (next_p, others)
         };
 
-        let cache = self.cache.clone();
-
-        // 1. High-priority dedicated worker for immediate next photo (covers >90% of user clicks)
-        if let Some(next_p) = immediate_next {
-            let cache_next = cache.clone();
-            std::thread::spawn(move || {
-                if cache_next.get_image(&next_p).is_none() {
-                    if let Ok(loaded) = load_decoded_image(&next_p) {
-                        cache_next.put_image(next_p, Arc::new(loaded));
-                    }
-                }
-            });
+        let mut wanted = other_paths.clone();
+        wanted.extend(immediate_next.iter().cloned());
+        if let Some(path) = self.state.borrow().paths.get(current_idx) {
+            wanted.push(path.clone());
         }
-
-        // 2. Secondary background worker for surrounding photos
-        std::thread::spawn(move || {
-            for path in other_paths {
-                if cache.get_image(&path).is_none() {
-                    if let Ok(loaded) = load_decoded_image(&path) {
-                        cache.put_image(path, Arc::new(loaded));
-                    }
-                }
-            }
-        });
+        self.cache.retain_image_requests(&wanted);
+        if let Some(path) = immediate_next {
+            self.cache.prefetch_image(path);
+        }
+        for path in other_paths {
+            self.cache.prefetch_image(path);
+        }
     }
 
     fn handle_dropped_paths(&self, raw_paths: Vec<PathBuf>) {
@@ -1061,4 +1151,70 @@ impl MainWindow {
             self.load_initial_paths(valid_images, 0);
         }
     }
+}
+
+#[cfg(test)]
+pub fn verify_gui_regressions() {
+    fn pump_until(condition: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "GTK operation timed out"
+            );
+            glib::MainContext::default().iteration(false);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("omaview-gui-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let first = dir.join("first.png");
+    let second = dir.join("second.png");
+    image::DynamicImage::new_rgb8(16, 8).save(&first).unwrap();
+    image::DynamicImage::new_rgb8(12, 6).save(&second).unwrap();
+    let app = libadwaita::Application::builder()
+        .application_id("org.omarchy.omaview.tests")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    app.register(gio::Cancellable::NONE).unwrap();
+    let win = MainWindow::new(&app, Rc::new(ThemeManager::new()));
+    win.load_initial_paths(vec![first.clone(), second.clone()], 99);
+    assert_eq!(win.state.borrow().current_index, 1);
+    pump_until(|| win.viewport.get_current_image().is_some());
+    assert_eq!(win.viewport.get_current_image().unwrap().path, second);
+    win.window.present();
+    pump_until(|| win.viewport.widget().width() > 0);
+    win.toggle_zen();
+    win.toggle_zen(); // Used to abort on a nested state borrow.
+    win.viewport.rotate_cw();
+    assert_eq!(win.viewport.get_edits().rotation, 90);
+    win.go_to_index(0);
+    // Navigating must immediately detach the previous image and its edits.
+    assert!(!win.viewport.get_edits().has_any_edits());
+    pump_until(|| win.viewport.get_current_image().is_some());
+    assert_eq!(win.viewport.get_current_image().unwrap().path, first);
+    win.viewport.zoom_in();
+    pump_until(|| {
+        !win.viewport.widget().settings().is_gtk_enable_animations()
+            || win.viewport.get_zoom_pct() > 100
+    });
+    win.viewport.zoom_fit();
+    let image = win.viewport.get_current_image().unwrap().image.clone();
+    win.save_processed(
+        image,
+        ImageEdits {
+            rotation: 90,
+            ..Default::default()
+        },
+        first.clone(),
+        false,
+    );
+    pump_until(|| !win.saving.get() && win.viewport.get_current_image().is_some());
+    let reloaded = win.viewport.get_current_image().unwrap();
+    assert_eq!((reloaded.width, reloaded.height), (8, 16));
+    win.viewport.zoom_100();
+    win.viewport.zoom_fit();
+    win.window.close();
+    ACTIVE_WINDOW.with(|cell| *cell.borrow_mut() = None);
+    std::fs::remove_dir_all(dir).unwrap();
 }

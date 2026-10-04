@@ -1,27 +1,21 @@
 use gio::prelude::*;
 use gtk4::prelude::*;
-use gtk4::{Box, Button, CheckButton, Entry, Image, Label, Orientation, Popover, ScrolledWindow, Separator};
+use gtk4::{
+    Box, Button, CheckButton, Entry, Image, Label, Orientation, Popover, ScrolledWindow, Separator,
+};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     #[serde(default)]
     pub editor: EditorConfig,
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            editor: EditorConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EditorConfig {
     #[serde(default)]
     pub preferred_raw_editor: Option<String>,
@@ -29,16 +23,6 @@ pub struct EditorConfig {
     pub always_launch_default: bool,
     #[serde(default)]
     pub custom_command: Option<String>,
-}
-
-impl Default for EditorConfig {
-    fn default() -> Self {
-        Self {
-            preferred_raw_editor: None,
-            always_launch_default: false,
-            custom_command: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,12 +49,11 @@ pub fn config_path() -> PathBuf {
 
 pub fn load_config() -> AppConfig {
     let p = config_path();
-    if p.exists() {
-        if let Ok(content) = std::fs::read_to_string(&p) {
-            if let Ok(cfg) = toml::from_str::<AppConfig>(&content) {
-                return cfg;
-            }
-        }
+    if p.exists()
+        && let Ok(content) = std::fs::read_to_string(&p)
+        && let Ok(cfg) = toml::from_str::<AppConfig>(&content)
+    {
+        return cfg;
     }
     AppConfig::default()
 }
@@ -80,10 +63,9 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let toml_str = toml::to_string_pretty(config)
-        .map_err(|e| format!("Serialization error: {}", e))?;
-    std::fs::write(&p, toml_str)
-        .map_err(|e| format!("Failed to write config file: {}", e))?;
+    let toml_str =
+        toml::to_string_pretty(config).map_err(|e| format!("Serialization error: {}", e))?;
+    std::fs::write(&p, toml_str).map_err(|e| format!("Failed to write config file: {}", e))?;
     Ok(())
 }
 
@@ -105,13 +87,43 @@ pub fn detect_all_raw_editors() -> Vec<RawEditorOption> {
 
     // 1. Pro RAW Developers
     let pro_editors = [
-        ("darktable", "Darktable", "Pro non-destructive RAW developer & workflow", "darktable"),
-        ("rawtherapee", "RawTherapee", "Advanced RAW photo processing system", "rawtherapee"),
-        ("digikam", "digiKam", "Professional photo management & RAW editor", "digikam"),
-        ("ansel", "Ansel", "Darktable fork focused on color science", "ansel"),
+        (
+            "darktable",
+            "Darktable",
+            "Pro non-destructive RAW developer & workflow",
+            "darktable",
+        ),
+        (
+            "rawtherapee",
+            "RawTherapee",
+            "Advanced RAW photo processing system",
+            "rawtherapee",
+        ),
+        (
+            "digikam",
+            "digiKam",
+            "Professional photo management & RAW editor",
+            "digikam",
+        ),
+        (
+            "ansel",
+            "Ansel",
+            "Darktable fork focused on color science",
+            "ansel",
+        ),
         ("ART", "ART", "Another RawTherapee RAW developer", "ART"),
-        ("vkdt", "VKDT", "GPU-accelerated Vulkan RAW developer", "camera-photo-symbolic"),
-        ("luminance-hdr", "Luminance HDR", "HDR workflow and tone mapping", "luminance-hdr"),
+        (
+            "vkdt",
+            "VKDT",
+            "GPU-accelerated Vulkan RAW developer",
+            "camera-photo-symbolic",
+        ),
+        (
+            "luminance-hdr",
+            "Luminance HDR",
+            "HDR workflow and tone mapping",
+            "luminance-hdr",
+        ),
     ];
 
     for (bin, name, desc, icon) in pro_editors {
@@ -132,9 +144,24 @@ pub fn detect_all_raw_editors() -> Vec<RawEditorOption> {
     // 2. Popular Graphic / Image Editors
     let general_editors = [
         ("gimp", "GIMP", "GNU Image Manipulation Program", "gimp"),
-        ("krita", "Krita", "Digital painting and photo retouching", "krita"),
-        ("pinta", "Pinta", "Simple image drawing and editing", "pinta"),
-        ("imv", "imv", "Lightweight image and RAW viewer", "image-x-generic-symbolic"),
+        (
+            "krita",
+            "Krita",
+            "Digital painting and photo retouching",
+            "krita",
+        ),
+        (
+            "pinta",
+            "Pinta",
+            "Simple image drawing and editing",
+            "pinta",
+        ),
+        (
+            "imv",
+            "imv",
+            "Lightweight image and RAW viewer",
+            "image-x-generic-symbolic",
+        ),
     ];
 
     for (bin, name, desc, icon) in general_editors {
@@ -175,7 +202,10 @@ pub fn detect_all_raw_editors() -> Vec<RawEditorOption> {
                 continue;
             }
             let app_id_str = app.id().map(|s| s.to_string());
-            if list.iter().any(|e| e.binary == bin_name || app_id_str.as_ref() == Some(&e.id)) {
+            if list
+                .iter()
+                .any(|e| e.binary == bin_name || app_id_str.as_ref() == Some(&e.id))
+            {
                 continue;
             }
             let display_name = app.name().to_string();
@@ -223,16 +253,25 @@ pub fn detect_all_raw_editors() -> Vec<RawEditorOption> {
 /// or user-configured custom command is available on the system.
 pub fn has_raw_compatible_app() -> bool {
     let config = load_config();
-    if config.editor.custom_command.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+    if config
+        .editor
+        .custom_command
+        .as_ref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+    {
         return true;
     }
-    if let Some(ref pref) = config.editor.preferred_raw_editor {
-        if pref != "xdg-open" && check_binary_in_path(pref).is_ok() {
-            return true;
-        }
+    if let Some(ref pref) = config.editor.preferred_raw_editor
+        && pref != "xdg-open"
+        && check_binary_in_path(pref).is_ok()
+    {
+        return true;
     }
     let editors = detect_all_raw_editors();
-    editors.iter().any(|e| e.is_pro_raw || e.id == "gimp" || e.id == "krita")
+    editors
+        .iter()
+        .any(|e| e.is_pro_raw || e.id == "gimp" || e.id == "krita")
 }
 
 /// Resolves the user's preferred editor, or returns the best available editor if not configured.
@@ -240,10 +279,12 @@ pub fn get_preferred_editor() -> Option<RawEditorOption> {
     let config = load_config();
     let editors = detect_all_raw_editors();
 
-    if let Some(ref pref_id) = config.editor.preferred_raw_editor {
-        if let Some(found) = editors.iter().find(|e| &e.id == pref_id || &e.binary == pref_id) {
-            return Some(found.clone());
-        }
+    if let Some(ref pref_id) = config.editor.preferred_raw_editor
+        && let Some(found) = editors
+            .iter()
+            .find(|e| &e.id == pref_id || &e.binary == pref_id)
+    {
+        return Some(found.clone());
     }
 
     // Default to first available (pro editors first, then general, then xdg-open)
@@ -280,7 +321,10 @@ pub fn launch_raw_editor(
     // Try desktop launch if desktop_id exists
     if let Some(ref d_id) = editor.desktop_id {
         let all = gio::AppInfo::all();
-        if let Some(app) = all.into_iter().find(|a| a.id().as_deref() == Some(d_id.as_str())) {
+        if let Some(app) = all
+            .into_iter()
+            .find(|a| a.id().as_deref() == Some(d_id.as_str()))
+        {
             let file = gio::File::for_path(path);
             if app.launch(&[file], None::<&gio::AppLaunchContext>).is_ok() {
                 return Ok(editor.display_name.clone());
@@ -324,7 +368,10 @@ where
     title.set_halign(gtk4::Align::Start);
     header_box.append(&title);
 
-    let filename = current_path.file_name().and_then(|f| f.to_str()).unwrap_or("RAW Photo");
+    let filename = current_path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("RAW Photo");
     let ext_badge = if crate::raw_loader::is_raw_image(current_path) {
         crate::raw_loader::raw_format_badge(current_path).to_string()
     } else {
@@ -397,7 +444,10 @@ where
 
                 let name_box = Box::new(Orientation::Horizontal, 6);
                 let name_lbl = Label::new(None);
-                name_lbl.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(&editor.display_name)));
+                name_lbl.set_markup(&format!(
+                    "<b>{}</b>",
+                    glib::markup_escape_text(&editor.display_name)
+                ));
                 name_lbl.set_halign(gtk4::Align::Start);
                 name_box.append(&name_lbl);
 
@@ -577,7 +627,9 @@ where
         let tip_icon = Image::from_icon_name("dialog-information-symbolic");
         tip_icon.set_pixel_size(16);
         tip_icon.add_css_class("dim-label");
-        let tip_lbl = Label::new(Some("Pro RAW tools (Darktable, RawTherapee) can be installed via pacman."));
+        let tip_lbl = Label::new(Some(
+            "Pro RAW tools (Darktable, RawTherapee) can be installed via pacman.",
+        ));
         tip_lbl.set_wrap(true);
         tip_lbl.set_max_width_chars(36);
         tip_lbl.add_css_class("dim-label");
@@ -604,11 +656,18 @@ mod tests {
     fn test_detect_all_raw_editors() {
         let editors = detect_all_raw_editors();
         for ed in &editors {
-            println!("  -> [{}] {} ({}) - is_pro: {}", ed.id, ed.display_name, ed.binary, ed.is_pro_raw);
+            println!(
+                "  -> [{}] {} ({}) - is_pro: {}",
+                ed.id, ed.display_name, ed.binary, ed.is_pro_raw
+            );
         }
         if check_binary_in_path("xdg-open").is_ok() {
             assert!(!editors.is_empty());
-            assert!(editors.iter().any(|e| e.binary == "xdg-open" || e.id == "xdg-open"));
+            assert!(
+                editors
+                    .iter()
+                    .any(|e| e.binary == "xdg-open" || e.id == "xdg-open")
+            );
         }
     }
 
@@ -629,9 +688,15 @@ mod tests {
         let read_back = std::fs::read_to_string(&test_file).unwrap();
         let loaded: AppConfig = toml::from_str(&read_back).unwrap();
 
-        assert_eq!(loaded.editor.preferred_raw_editor.as_deref(), Some("darktable"));
+        assert_eq!(
+            loaded.editor.preferred_raw_editor.as_deref(),
+            Some("darktable")
+        );
         assert!(loaded.editor.always_launch_default);
-        assert_eq!(loaded.editor.custom_command.as_deref(), Some("darktable %f"));
+        assert_eq!(
+            loaded.editor.custom_command.as_deref(),
+            Some("darktable %f")
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -660,10 +725,24 @@ mod tests {
     fn test_has_raw_compatible_app() {
         let has = has_raw_compatible_app();
         let config = load_config();
-        let custom_set = config.editor.custom_command.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
-        let pref_set = config.editor.preferred_raw_editor.as_ref().map(|s| s != "xdg-open" && check_binary_in_path(s).is_ok()).unwrap_or(false);
+        let custom_set = config
+            .editor
+            .custom_command
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let pref_set = config
+            .editor
+            .preferred_raw_editor
+            .as_ref()
+            .map(|s| s != "xdg-open" && check_binary_in_path(s).is_ok())
+            .unwrap_or(false);
         let editors = detect_all_raw_editors();
-        let expected = custom_set || pref_set || editors.iter().any(|e| e.is_pro_raw || e.id == "gimp" || e.id == "krita");
+        let expected = custom_set
+            || pref_set
+            || editors
+                .iter()
+                .any(|e| e.is_pro_raw || e.id == "gimp" || e.id == "krita");
         assert_eq!(has, expected);
     }
 }

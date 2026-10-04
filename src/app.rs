@@ -1,7 +1,7 @@
+use libadwaita::Application;
+use libadwaita::prelude::*;
 use std::path::PathBuf;
 use std::rc::Rc;
-use libadwaita::prelude::*;
-use libadwaita::Application;
 
 use crate::theme::ThemeManager;
 use crate::util::discover_images;

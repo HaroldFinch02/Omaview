@@ -1,6 +1,6 @@
+use gdk4::Key;
 use gtk4::prelude::*;
 use gtk4::{EventControllerKey, Window};
-use gdk4::Key;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -41,7 +41,18 @@ pub fn create_key_controller<F: Fn(AppAction) -> glib::Propagation + 'static>(
     let controller = EventControllerKey::new();
     controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
 
-    controller.connect_key_pressed(move |_, key, _keycode, state| {
+    controller.connect_key_pressed(move |controller, key, _keycode, state| {
+        // Popover text fields and adjustment sliders must receive their own keys.
+        if let Some(window) = controller
+            .widget()
+            .and_then(|w| w.downcast::<Window>().ok())
+            && let Some(focus) = gtk4::prelude::GtkWindowExt::focus(&window)
+            && (focus.is::<gtk4::Editable>()
+                || focus.is::<gtk4::TextView>()
+                || focus.is::<gtk4::Range>())
+        {
+            return glib::Propagation::Proceed;
+        }
         let is_ctrl = state.contains(gdk4::ModifierType::CONTROL_MASK);
         let is_shift = state.contains(gdk4::ModifierType::SHIFT_MASK);
 

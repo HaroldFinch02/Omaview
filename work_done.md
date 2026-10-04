@@ -294,3 +294,17 @@
 
 
 
+## Code review and performance improvements — 2026-10-04
+
+- Preserved album navigation, supported formats, editing order, external-editor integration, theme styling, and trash behavior.
+- Fixed late decode completions resetting current edits, previous-image edit ownership during navigation, stale saved-image surfaces, invalid initial indices, and duplicate neighbor loads.
+- Fixed nested RefCell borrows when exiting Zen mode, refreshing a removed expanded album, and closing/replacing RAW chooser popovers. EXIF popovers now unparent on close.
+- Corrected crop mapping through rotation/flips and composed repeated crops. Double-click crop application now uses the same rendering/callback path as Apply. Thin aspect-ratio selections no longer use invalid clamp bounds.
+- Applied decoder EXIF orientation before preview/editing and fixed filename escaping in plain-text metadata. Kept same-stem PNG/TIFF files visible alongside RAW/JPEG pairs. Empty saved album lists remain empty.
+- JPEG adjustment saves now convert RGBA to RGB. Image encoding/saving runs off the GTK thread and atomically replaces the destination only after successful encoding, flushing, and syncing. Failed saves keep original files and edits and show a toast. RAW previews export as new image copies instead of writing PNG bytes over camera originals.
+- Replaced per-redraw/per-navigation threads with fixed worker pools, shared pending requests, foreground priority, and cancellation of obsolete neighbor requests. Separate thumbnail and edit/save pools keep background album work from starving interaction.
+- Limited decoded-image cache retention to 256 MiB (one oversized image may exceed this), fixed thumbnail LRU behavior and zero-capacity caches, and removed the separate stale full-resolution surface cache. Cairo can take ownership of edited pixel buffers without another full-image copy.
+- Edit previews coalesce slider changes into one worker at a time and discard obsolete results. Programmatic slider resets suppress redundant renders. Input fields and sliders receive their own keyboard events.
+- Filmstrip draws only visible slots and smoothly recenters using the GTK frame clock. Zoom interpolation handles fractional scroll input. Both animations honor GTK's animation setting and stop requesting frames when settled. Fit zoom metadata updates on resize.
+- Shared each album image list among cards instead of cloning it per card; expanded grids are created on demand. RAW extraction publishes completed cache files atomically and supports PPM previews. Replaced inappropriate callback locks with main-thread Rc/RefCell state, simplified Clippy findings, and formatted Rust sources.
+- Verification: 33 tests pass, including new regression coverage for crop geometry, EXIF orientation, JPEG/failed saves, concurrent decode sharing, cache invalidation, thumbnail LRU, malformed theme colors, and empty album persistence. The GTK regression smoke test exercises clamped navigation, edit reset, zoom, Zen mode, and overwrite/reload. `cargo clippy --locked --all-targets -- -D warnings` and `cargo fmt --all --check` pass; optimized release build verified. Performance improvements are structural; no before/after FPS benchmark was taken.

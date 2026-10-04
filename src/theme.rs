@@ -1,7 +1,9 @@
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
-use notify::{Watcher, RecursiveMode, RecommendedWatcher};
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[allow(dead_code)]
@@ -28,7 +30,7 @@ pub struct OmarchyColors {
 
 pub fn parse_hex_color(hex: &str) -> Option<(f64, f64, f64)> {
     let s = hex.trim().trim_start_matches('#');
-    if s.len() == 6 {
+    if s.len() == 6 && s.is_ascii() {
         let r = u8::from_str_radix(&s[0..2], 16).ok()? as f64 / 255.0;
         let g = u8::from_str_radix(&s[2..4], 16).ok()? as f64 / 255.0;
         let b = u8::from_str_radix(&s[4..6], 16).ok()? as f64 / 255.0;
@@ -53,12 +55,11 @@ pub fn theme_file_path() -> Option<PathBuf> {
 }
 
 pub fn load_current_theme() -> OmarchyColors {
-    if let Some(path) = theme_file_path() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(colors) = toml::from_str::<OmarchyColors>(&content) {
-                return colors;
-            }
-        }
+    if let Some(path) = theme_file_path()
+        && let Ok(content) = std::fs::read_to_string(&path)
+        && let Ok(colors) = toml::from_str::<OmarchyColors>(&content)
+    {
+        return colors;
     }
     OmarchyColors {
         mode: Some("dark".into()),
@@ -748,11 +749,13 @@ window.dialog button.destructive-action:hover,
     )
 }
 
+type ThemeCallbacks = Rc<RefCell<Vec<Rc<dyn Fn(&OmarchyColors)>>>>;
+
 pub struct ThemeManager {
     colors: Arc<RwLock<OmarchyColors>>,
     _css_provider: gtk4::CssProvider,
     _watcher: Option<RecommendedWatcher>,
-    callbacks: Arc<RwLock<Vec<Box<dyn Fn(&OmarchyColors) + 'static>>>>,
+    callbacks: ThemeCallbacks,
 }
 
 thread_local! {
@@ -763,7 +766,7 @@ thread_local! {
 struct ThemeManagerHandle {
     colors: Arc<RwLock<OmarchyColors>>,
     css_provider: gtk4::CssProvider,
-    callbacks: Arc<RwLock<Vec<Box<dyn Fn(&OmarchyColors) + 'static>>>>,
+    callbacks: ThemeCallbacks,
 }
 
 impl ThemeManager {
@@ -783,7 +786,7 @@ impl ThemeManager {
             );
         }
 
-        let callbacks = Arc::new(RwLock::new(Vec::new()));
+        let callbacks = Rc::new(RefCell::new(Vec::new()));
 
         let handle = ThemeManagerHandle {
             colors: colors.clone(),
@@ -811,9 +814,7 @@ impl ThemeManager {
     }
 
     pub fn on_theme_changed<F: Fn(&OmarchyColors) + 'static>(&self, callback: F) {
-        if let Ok(mut cbs) = self.callbacks.write() {
-            cbs.push(Box::new(callback));
-        }
+        self.callbacks.borrow_mut().push(Rc::new(callback));
     }
 
     fn start_watching(&mut self) {
@@ -831,10 +832,9 @@ impl ThemeManager {
                                     if let Ok(mut w) = handle.colors.write() {
                                         *w = new_colors.clone();
                                     }
-                                    if let Ok(cbs) = handle.callbacks.read() {
-                                        for cb in cbs.iter() {
-                                            cb(&new_colors);
-                                        }
+                                    let callbacks = handle.callbacks.borrow().clone();
+                                    for cb in callbacks {
+                                        cb(&new_colors);
                                     }
                                 }
                             });
@@ -846,10 +846,10 @@ impl ThemeManager {
         });
 
         if let Ok(mut watcher) = res {
-            if let Some(path) = theme_file_path() {
-                if let Some(parent) = path.parent() {
-                    let _ = watcher.watch(parent, RecursiveMode::NonRecursive);
-                }
+            if let Some(path) = theme_file_path()
+                && let Some(parent) = path.parent()
+            {
+                let _ = watcher.watch(parent, RecursiveMode::NonRecursive);
             }
 
             if let Ok(home) = std::env::var("HOME") {
@@ -864,3 +864,12 @@ impl ThemeManager {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn malformed_theme_color_does_not_panic() {
+        assert_eq!(super::parse_hex_color("€abc"), None);
+        assert_eq!(super::parse_hex_color("#zzzzzz"), None);
+        assert_eq!(super::parse_hex_color("#ff0000"), Some((1.0, 0.0, 0.0)));
+    }
+}

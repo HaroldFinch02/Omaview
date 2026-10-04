@@ -1,7 +1,7 @@
+use gtk4::prelude::*;
+use gtk4::{Box, Grid, Label, Orientation, Popover};
 use std::fs::File;
 use std::path::Path;
-use gtk4::prelude::*;
-use gtk4::{Box, Label, Orientation, Popover, Grid};
 
 #[derive(Debug, Clone, Default)]
 pub struct ExifInfo {
@@ -24,13 +24,31 @@ fn extract_exif_from_file(path: &Path) -> Option<ExifInfo> {
     let mut info = ExifInfo::default();
 
     if let Some(field) = exif.get_field(exif::Tag::Make, exif::In::PRIMARY) {
-        info.make = Some(field.display_value().to_string().trim_matches('"').to_string());
+        info.make = Some(
+            field
+                .display_value()
+                .to_string()
+                .trim_matches('"')
+                .to_string(),
+        );
     }
     if let Some(field) = exif.get_field(exif::Tag::Model, exif::In::PRIMARY) {
-        info.model = Some(field.display_value().to_string().trim_matches('"').to_string());
+        info.model = Some(
+            field
+                .display_value()
+                .to_string()
+                .trim_matches('"')
+                .to_string(),
+        );
     }
     if let Some(field) = exif.get_field(exif::Tag::LensModel, exif::In::PRIMARY) {
-        info.lens = Some(field.display_value().to_string().trim_matches('"').to_string());
+        info.lens = Some(
+            field
+                .display_value()
+                .to_string()
+                .trim_matches('"')
+                .to_string(),
+        );
     }
     if let Some(field) = exif.get_field(exif::Tag::FocalLength, exif::In::PRIMARY) {
         info.focal_length = Some(field.display_value().to_string());
@@ -57,15 +75,15 @@ pub fn extract_exif(path: &Path) -> Option<ExifInfo> {
     }
 
     if crate::raw_loader::is_raw_image(path) {
-        if let Some(companion) = crate::raw_loader::find_companion_jpeg(path) {
-            if let Some(info) = extract_exif_from_file(&companion) {
-                return Some(info);
-            }
+        if let Some(companion) = crate::raw_loader::find_companion_jpeg(path)
+            && let Some(info) = extract_exif_from_file(&companion)
+        {
+            return Some(info);
         }
-        if let Some(cached) = crate::raw_loader::get_cached_raw_preview_path(path) {
-            if let Some(info) = extract_exif_from_file(&cached) {
-                return Some(info);
-            }
+        if let Some(cached) = crate::raw_loader::get_cached_raw_preview_path(path)
+            && let Some(info) = extract_exif_from_file(&cached)
+        {
+            return Some(info);
         }
     }
 
@@ -108,7 +126,7 @@ impl MetadataPill {
         let text = if total > 0 {
             format!(
                 "{} | {}x{} | {}% | {}/{}",
-                glib::markup_escape_text(filename),
+                filename,
                 width,
                 height,
                 zoom_pct,
@@ -122,12 +140,7 @@ impl MetadataPill {
     }
 }
 
-pub fn create_exif_popover(
-    path: &Path,
-    width: u32,
-    height: u32,
-    file_size_str: &str,
-) -> Popover {
+pub fn create_exif_popover(path: &Path, width: u32, height: u32, file_size_str: &str) -> Popover {
     let popover = Popover::new();
     popover.add_css_class("exif-popover");
 
@@ -146,7 +159,10 @@ pub fn create_exif_popover(
     grid.set_column_spacing(16);
     grid.set_row_spacing(6);
 
-    let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("Unknown");
+    let filename = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("Unknown");
     let mut row = 0;
 
     let add_row = |g: &Grid, r: &mut i32, key: &str, val: &str| {
@@ -163,11 +179,21 @@ pub fn create_exif_popover(
     };
 
     add_row(&grid, &mut row, "File Name", filename);
-    add_row(&grid, &mut row, "Dimensions", &format!("{} × {} px", width, height));
+    add_row(
+        &grid,
+        &mut row,
+        "Dimensions",
+        &format!("{} × {} px", width, height),
+    );
     add_row(&grid, &mut row, "File Size", file_size_str);
 
     if crate::raw_loader::is_raw_image(path) {
-        add_row(&grid, &mut row, "RAW Format", crate::raw_loader::raw_format_badge(path));
+        add_row(
+            &grid,
+            &mut row,
+            "RAW Format",
+            crate::raw_loader::raw_format_badge(path),
+        );
         if crate::raw_loader::find_companion_jpeg(path).is_some() {
             add_row(&grid, &mut row, "Companion", "RAW + JPEG");
         }

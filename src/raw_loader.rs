@@ -1,9 +1,9 @@
+use image::DynamicImage;
 use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use image::DynamicImage;
+use std::sync::{Mutex, OnceLock};
 
 pub const RAW_EXTENSIONS: &[&str] = &[
     "arw", "cr2", "cr3", "nef", "nrw", "raf", "rw2", "orf", "dng", "pef", "3fr", "iiq",
@@ -113,8 +113,7 @@ type LibrawOpenFileFn = unsafe extern "C" fn(
     lr: *mut std::ffi::c_void,
     file: *const std::os::raw::c_char,
 ) -> std::os::raw::c_int;
-type LibrawUnpackThumbFn =
-    unsafe extern "C" fn(lr: *mut std::ffi::c_void) -> std::os::raw::c_int;
+type LibrawUnpackThumbFn = unsafe extern "C" fn(lr: *mut std::ffi::c_void) -> std::os::raw::c_int;
 type LibrawDcrawThumbWriterFn = unsafe extern "C" fn(
     lr: *mut std::ffi::c_void,
     fname: *const std::os::raw::c_char,
@@ -144,12 +143,11 @@ fn get_libraw_api() -> Option<&'static LibRawApi> {
                 let handle = unsafe { libc::dlopen(c_name.as_ptr(), libc::RTLD_LAZY) };
                 if !handle.is_null() {
                     unsafe {
-                        let init_sym = libc::dlsym(handle, b"libraw_init\0".as_ptr() as _);
-                        let open_sym = libc::dlsym(handle, b"libraw_open_file\0".as_ptr() as _);
-                        let unpack_sym = libc::dlsym(handle, b"libraw_unpack_thumb\0".as_ptr() as _);
-                        let writer_sym =
-                            libc::dlsym(handle, b"libraw_dcraw_thumb_writer\0".as_ptr() as _);
-                        let close_sym = libc::dlsym(handle, b"libraw_close\0".as_ptr() as _);
+                        let init_sym = libc::dlsym(handle, c"libraw_init".as_ptr());
+                        let open_sym = libc::dlsym(handle, c"libraw_open_file".as_ptr());
+                        let unpack_sym = libc::dlsym(handle, c"libraw_unpack_thumb".as_ptr());
+                        let writer_sym = libc::dlsym(handle, c"libraw_dcraw_thumb_writer".as_ptr());
+                        let close_sym = libc::dlsym(handle, c"libraw_close".as_ptr());
 
                         if !init_sym.is_null()
                             && !open_sym.is_null()
@@ -159,11 +157,24 @@ fn get_libraw_api() -> Option<&'static LibRawApi> {
                         {
                             return Some(LibRawApi {
                                 _handle: handle,
-                                init: std::mem::transmute(init_sym),
-                                open_file: std::mem::transmute(open_sym),
-                                unpack_thumb: std::mem::transmute(unpack_sym),
-                                dcraw_thumb_writer: std::mem::transmute(writer_sym),
-                                close: std::mem::transmute(close_sym),
+                                init: std::mem::transmute::<*mut std::ffi::c_void, LibrawInitFn>(
+                                    init_sym,
+                                ),
+                                open_file: std::mem::transmute::<
+                                    *mut std::ffi::c_void,
+                                    LibrawOpenFileFn,
+                                >(open_sym),
+                                unpack_thumb: std::mem::transmute::<
+                                    *mut std::ffi::c_void,
+                                    LibrawUnpackThumbFn,
+                                >(unpack_sym),
+                                dcraw_thumb_writer: std::mem::transmute::<
+                                    *mut std::ffi::c_void,
+                                    LibrawDcrawThumbWriterFn,
+                                >(writer_sym),
+                                close: std::mem::transmute::<*mut std::ffi::c_void, LibrawCloseFn>(
+                                    close_sym,
+                                ),
                             });
                         } else {
                             libc::dlclose(handle);
@@ -307,29 +318,28 @@ pub fn extract_via_tiff_scan(raw_path: &Path, out_file: &Path) -> Result<PathBuf
             match tag {
                 0x0201 => jpeg_offset = Some(val_or_offset as u64),
                 0x0202 => jpeg_length = Some(val_or_offset as u64),
-                0x014a => {
-                    if count == 1 {
-                        sub_ifd_offsets.push(val_or_offset as u64);
-                    }
+                0x014a if count == 1 => {
+                    sub_ifd_offsets.push(val_or_offset as u64);
                 }
                 _ => {}
             }
         }
 
-        if let (Some(offset), Some(length)) = (jpeg_offset, jpeg_length) {
-            if offset + length <= file_len && length >= 4 {
-                if file.seek(SeekFrom::Start(offset)).is_ok() {
-                    let mut magic_check = [0u8; 2];
-                    if file.read_exact(&mut magic_check).is_ok() && magic_check == [0xFF, 0xD8] {
-                        file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
-                        let mut buf = vec![0u8; length as usize];
-                        file.read_exact(&mut buf).map_err(|e| e.to_string())?;
+        if let (Some(offset), Some(length)) = (jpeg_offset, jpeg_length)
+            && offset + length <= file_len
+            && length >= 4
+            && file.seek(SeekFrom::Start(offset)).is_ok()
+        {
+            let mut magic_check = [0u8; 2];
+            if file.read_exact(&mut magic_check).is_ok() && magic_check == [0xFF, 0xD8] {
+                file.seek(SeekFrom::Start(offset))
+                    .map_err(|e| e.to_string())?;
+                let mut buf = vec![0u8; length as usize];
+                file.read_exact(&mut buf).map_err(|e| e.to_string())?;
 
-                        let mut out = File::create(out_file).map_err(|e| e.to_string())?;
-                        out.write_all(&buf).map_err(|e| e.to_string())?;
-                        return Ok(out_file.to_path_buf());
-                    }
-                }
+                let mut out = File::create(out_file).map_err(|e| e.to_string())?;
+                out.write_all(&buf).map_err(|e| e.to_string())?;
+                return Ok(out_file.to_path_buf());
             }
         }
 
@@ -362,7 +372,7 @@ pub fn extract_via_tiff_scan(raw_path: &Path, out_file: &Path) -> Result<PathBuf
 
 fn extract_via_cli(raw_path: &Path, out_file: &Path) -> Result<PathBuf, String> {
     let out_dir = out_file.parent().unwrap_or_else(|| Path::new("."));
-    
+
     // Try exiv2 first
     let res = std::process::Command::new("exiv2")
         .arg("-e")
@@ -372,15 +382,15 @@ fn extract_via_cli(raw_path: &Path, out_file: &Path) -> Result<PathBuf, String> 
         .arg(raw_path)
         .output();
 
-    if let Ok(output) = res {
-        if output.status.success() {
-            let stem = raw_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            for ext in &["jpg", "jpeg"] {
-                let candidate = out_dir.join(format!("{}-preview3.{}", stem, ext));
-                if candidate.is_file() {
-                    let _ = fs::rename(&candidate, out_file);
-                    return Ok(out_file.to_path_buf());
-                }
+    if let Ok(output) = res
+        && output.status.success()
+    {
+        let stem = raw_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        for ext in &["jpg", "jpeg"] {
+            let candidate = out_dir.join(format!("{}-preview3.{}", stem, ext));
+            if candidate.is_file() {
+                fs::rename(&candidate, out_file).map_err(|e| e.to_string())?;
+                return Ok(out_file.to_path_buf());
             }
         }
     }
@@ -392,15 +402,15 @@ fn extract_via_cli(raw_path: &Path, out_file: &Path) -> Result<PathBuf, String> 
         .current_dir(out_dir)
         .output();
 
-    if let Ok(output) = res_dcraw {
-        if output.status.success() {
-            let stem = raw_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            for ext in &["thumb.jpg", "thumb.ppm"] {
-                let candidate = out_dir.join(format!("{}.{}", stem, ext));
-                if candidate.is_file() {
-                    let _ = fs::rename(&candidate, out_file);
-                    return Ok(out_file.to_path_buf());
-                }
+    if let Ok(output) = res_dcraw
+        && output.status.success()
+    {
+        let stem = raw_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        for ext in &["thumb.jpg", "thumb.ppm"] {
+            let candidate = out_dir.join(format!("{}.{}", stem, ext));
+            if candidate.is_file() {
+                fs::rename(&candidate, out_file).map_err(|e| e.to_string())?;
+                return Ok(out_file.to_path_buf());
             }
         }
     }
@@ -421,24 +431,31 @@ pub fn get_or_extract_raw_preview(raw_path: &Path) -> Result<PathBuf, String> {
         return Ok(cached);
     }
 
+    // Full-image and thumbnail workers may request the same RAW concurrently.
+    // Serialize extraction and publish only complete previews to the disk cache.
+    static EXTRACTION_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = EXTRACTION_LOCK.lock().map_err(|e| e.to_string())?;
+    if let Some(cached) = get_cached_raw_preview_path(raw_path) {
+        return Ok(cached);
+    }
     let key = compute_raw_cache_key(raw_path)
         .ok_or_else(|| "Failed to compute cache key for RAW file".to_string())?;
-    let target_cache_file = get_raw_cache_dir().join(format!("{}.jpg", key));
-
-    // Try LibRaw first (covers 100% of cameras including CR3 and RAF)
-    if let Ok(path) = extract_via_libraw(raw_path, &target_cache_file) {
-        return Ok(path);
+    let cache_dir = get_raw_cache_dir();
+    let temp = cache_dir.join(format!("{key}-{}.tmp.jpg", std::process::id()));
+    let result = extract_via_libraw(raw_path, &temp)
+        .or_else(|_| extract_via_tiff_scan(raw_path, &temp))
+        .or_else(|_| extract_via_cli(raw_path, &temp));
+    if let Ok(extracted) = result {
+        let extension = extracted
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("jpg");
+        let target = cache_dir.join(format!("{key}.{extension}"));
+        fs::rename(&extracted, &target).map_err(|e| format!("Cannot cache RAW preview: {e}"))?;
+        return Ok(target);
     }
-
-    // Try Pure-Rust TIFF parser
-    if let Ok(path) = extract_via_tiff_scan(raw_path, &target_cache_file) {
-        return Ok(path);
-    }
-
-    // Try CLI fallback
-    if let Ok(path) = extract_via_cli(raw_path, &target_cache_file) {
-        return Ok(path);
-    }
+    let _ = fs::remove_file(&temp);
+    let _ = fs::remove_file(temp.with_extension("ppm"));
 
     Err(format!(
         "Failed to extract embedded preview from RAW image: {}",
@@ -448,12 +465,7 @@ pub fn get_or_extract_raw_preview(raw_path: &Path) -> Result<PathBuf, String> {
 
 pub fn load_raw_as_dynamic_image(raw_path: &Path) -> Result<DynamicImage, String> {
     let preview_path = get_or_extract_raw_preview(raw_path)?;
-    image::ImageReader::open(&preview_path)
-        .map_err(|e| format!("Cannot open extracted preview {}: {}", preview_path.display(), e))?
-        .with_guessed_format()
-        .map_err(|e| format!("Cannot guess format for {}: {}", preview_path.display(), e))?
-        .decode()
-        .map_err(|e| format!("Cannot decode extracted preview {}: {}", preview_path.display(), e))
+    crate::image_loader::load_dynamic_image(&preview_path)
 }
 
 #[cfg(test)]
@@ -517,7 +529,10 @@ mod tests {
         let out_jpg = temp_dir.join("extracted.jpg");
 
         // Construct a minimal valid TIFF with JPEGInterchangeFormat tag
-        let fake_jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9];
+        let fake_jpeg = vec![
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00,
+            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
+        ];
         let jpeg_offset = 200u32;
         let jpeg_length = fake_jpeg.len() as u32;
 
@@ -569,7 +584,12 @@ mod tests {
             return;
         }
 
-        for file in ["sony_sample.ARW", "nikon_sample.NEF", "canon_sample.CR3", "fuji_sample.RAF"] {
+        for file in [
+            "sony_sample.ARW",
+            "nikon_sample.NEF",
+            "canon_sample.CR3",
+            "fuji_sample.RAF",
+        ] {
             let path = test_dir.join(file);
             if path.exists() {
                 let preview = get_or_extract_raw_preview(&path);

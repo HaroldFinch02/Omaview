@@ -189,8 +189,8 @@ When Omarchy switches colors or modes (e.g. Catppuccin, Tokyo Night, Gruvbox, No
 
 ### Prerequisites
 
-- Rust 1.80+ (tested on Rust 2024 edition)
-- GTK4 (`gtk4 >= 4.12`)
+- Rust 1.88+ (Rust 2024 edition)
+- GTK4 (`gtk4 >= 4.14`)
 - Libadwaita (`libadwaita >= 1.5`)
 - pkg-config
 

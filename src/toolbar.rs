@@ -1,6 +1,6 @@
 use gtk4::prelude::*;
 use gtk4::{Box, Button, Label, Orientation, Popover, Scale};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 #[derive(Clone)]
@@ -25,6 +25,7 @@ pub struct BottomToolbar {
     scale_contrast: Scale,
     scale_saturation: Scale,
     scale_warmth: Scale,
+    resetting_adjustments: Rc<Cell<bool>>,
 }
 
 impl BottomToolbar {
@@ -77,7 +78,10 @@ impl BottomToolbar {
         container.append(&btn_crop);
 
         // 7. Rotate (matches sample_ui.jpeg 7th icon)
-        let btn_rotate_cw = make_btn("object-rotate-right-symbolic", "Rotate 90° CW (r / Shift+R)");
+        let btn_rotate_cw = make_btn(
+            "object-rotate-right-symbolic",
+            "Rotate 90° CW (r / Shift+R)",
+        );
         container.append(&btn_rotate_cw);
 
         // 8. Adjustments (matches sample_ui.jpeg 8th icon)
@@ -89,7 +93,10 @@ impl BottomToolbar {
         container.append(&btn_info);
 
         // 10. Open RAW in External Editor (Darktable, etc.)
-        let btn_open_raw = make_btn("camera-photo-symbolic", "Open RAW in External Editor (Ctrl+O / o)");
+        let btn_open_raw = make_btn(
+            "camera-photo-symbolic",
+            "Open RAW in External Editor (Ctrl+O / o)",
+        );
         btn_open_raw.set_visible(false);
         container.append(&btn_open_raw);
 
@@ -194,6 +201,7 @@ impl BottomToolbar {
             btn_trash,
             btn_save,
             adjustments_popover,
+            resetting_adjustments: Rc::new(Cell::new(false)),
             scale_exposure,
             scale_contrast,
             scale_saturation,
@@ -310,31 +318,40 @@ impl BottomToolbar {
         let sw = self.scale_warmth.clone();
 
         let trigger = {
+            let resetting = self.resetting_adjustments.clone();
             let f = f.clone();
             let se = se.clone();
             let sc = sc.clone();
             let ss = ss.clone();
             let sw = sw.clone();
             move || {
-                f(se.value(), sc.value(), ss.value(), sw.value());
+                if !resetting.get() {
+                    f(se.value(), sc.value(), ss.value(), sw.value());
+                }
             }
         };
 
         let trig1 = Rc::new(RefCell::new(trigger));
         let t1 = trig1.clone();
-        self.scale_exposure.connect_value_changed(move |_| (t1.borrow())());
+        self.scale_exposure
+            .connect_value_changed(move |_| (t1.borrow())());
         let t2 = trig1.clone();
-        self.scale_contrast.connect_value_changed(move |_| (t2.borrow())());
+        self.scale_contrast
+            .connect_value_changed(move |_| (t2.borrow())());
         let t3 = trig1.clone();
-        self.scale_saturation.connect_value_changed(move |_| (t3.borrow())());
+        self.scale_saturation
+            .connect_value_changed(move |_| (t3.borrow())());
         let t4 = trig1.clone();
-        self.scale_warmth.connect_value_changed(move |_| (t4.borrow())());
+        self.scale_warmth
+            .connect_value_changed(move |_| (t4.borrow())());
     }
 
     pub fn reset_adjustments_ui(&self) {
+        self.resetting_adjustments.set(true);
         self.scale_exposure.set_value(0.0);
         self.scale_contrast.set_value(0.0);
         self.scale_saturation.set_value(0.0);
         self.scale_warmth.set_value(0.0);
+        self.resetting_adjustments.set(false);
     }
 }

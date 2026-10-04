@@ -1,13 +1,16 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
+use crate::util::Callback;
+use gtk4::prelude::*;
+use gtk4::{
+    Box as GtkBox, Button, DrawingArea, EventControllerScroll, EventControllerScrollFlags,
+    GestureClick, Orientation,
+};
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
-use gtk4::prelude::*;
-use gtk4::{Box as GtkBox, Button, DrawingArea, GestureClick, EventControllerScroll, EventControllerScrollFlags, Orientation};
 
-use crate::image_loader::{ImageCache, load_dynamic_image, generate_thumbnail, rgba_to_cairo_surface};
+use crate::image_loader::{ImageCache, rgba_to_cairo_surface};
 use crate::theme::OmarchyColors;
 
 const FILMSTRIP_WIDTH: i32 = 148;
@@ -20,16 +23,25 @@ thread_local! {
     static REDRAW_NOTIFIER: RefCell<Option<glib::WeakRef<DrawingArea>>> = const { RefCell::new(None) };
 }
 
-fn trigger_filmstrip_redraw() {
-    glib::idle_add_once(|| {
+fn trigger_filmstrip_redraw(path: PathBuf, success: bool) {
+    glib::idle_add_once(move || {
+        FILMSTRIP_STATE.with(|cell| {
+            if success && let Some(state) = cell.borrow().as_ref().and_then(|s| s.upgrade()) {
+                state.borrow_mut().loading.remove(&path);
+            }
+        });
         REDRAW_NOTIFIER.with(|cell| {
-            if let Some(weak) = cell.borrow().as_ref() {
-                if let Some(a) = weak.upgrade() {
-                    a.queue_draw();
-                }
+            if let Some(weak) = cell.borrow().as_ref()
+                && let Some(a) = weak.upgrade()
+            {
+                a.queue_draw();
             }
         });
     });
+}
+
+thread_local! {
+    static FILMSTRIP_STATE: RefCell<Option<std::rc::Weak<RefCell<FilmstripState>>>> = const { RefCell::new(None) };
 }
 
 pub struct FilmstripState {
@@ -38,6 +50,8 @@ pub struct FilmstripState {
     pub cache: ImageCache,
     pub surfaces: HashMap<PathBuf, cairo::ImageSurface>,
     pub colors: OmarchyColors,
+    loading: HashSet<PathBuf>,
+    display_index: f64,
 }
 
 #[derive(Clone)]
@@ -49,7 +63,8 @@ pub struct Filmstrip {
     #[allow(dead_code)]
     btn_down: Button,
     state: Rc<RefCell<FilmstripState>>,
-    on_select: Rc<RefCell<Option<Box<dyn Fn(usize) + 'static>>>>,
+    on_select: Callback<dyn Fn(usize)>,
+    animating: Rc<Cell<bool>>,
 }
 
 fn draw_rounded_rect(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
@@ -96,7 +111,10 @@ impl Filmstrip {
             cache,
             surfaces: HashMap::new(),
             colors,
+            loading: HashSet::new(),
+            display_index: 0.0,
         }));
+        FILMSTRIP_STATE.with(|cell| *cell.borrow_mut() = Some(Rc::downgrade(&state)));
 
         // Draw function
         let state_clone = state.clone();
@@ -110,20 +128,25 @@ impl Filmstrip {
             let container_h = height as f64;
             let container_w = width as f64;
             let h = SLOT_HEIGHT;
-            let i = s.active_index as f64;
+            let i = s.display_index;
 
             // Centering algorithm: offset_y = H / 2 - (i * h + h / 2)
             let offset_y = (container_h / 2.0) - (i * h + (h / 2.0));
 
             let accent_hex = s.colors.accent.as_deref().unwrap_or("#7aa2f7");
-            let (ar, ag, ab) = crate::theme::parse_hex_color(accent_hex).unwrap_or((0.48, 0.64, 0.97));
+            let (ar, ag, ab) =
+                crate::theme::parse_hex_color(accent_hex).unwrap_or((0.48, 0.64, 0.97));
 
             let bg_hex = s.colors.background.as_deref().unwrap_or("#1a1b26");
-            let (bgr, bgg, bgb) = crate::theme::parse_hex_color(bg_hex).unwrap_or((0.10, 0.11, 0.15));
+            let (bgr, bgg, bgb) =
+                crate::theme::parse_hex_color(bg_hex).unwrap_or((0.10, 0.11, 0.15));
 
-            let paths_to_draw = s.paths.clone();
-
-            for (idx, path) in paths_to_draw.iter().enumerate() {
+            let first = ((-offset_y / h).floor().max(0.0) as usize).min(total);
+            let end = (((container_h - offset_y) / h).ceil().max(0.0) as usize).min(total);
+            // Only visit visible slots; large albums cost the same per frame.
+            let paths_to_draw: Vec<_> = s.paths[first..end].to_vec();
+            for (local_idx, path) in paths_to_draw.iter().enumerate() {
+                let idx = first + local_idx;
                 let slot_top = offset_y + (idx as f64) * h;
                 let slot_bottom = slot_top + h;
 
@@ -139,12 +162,11 @@ impl Filmstrip {
 
                 let is_active = idx == s.active_index;
 
-                if !s.surfaces.contains_key(path) {
-                    if let Some(dec) = s.cache.get_thumbnail(path) {
-                        if let Ok(surf) = rgba_to_cairo_surface(&dec.rgba) {
-                            s.surfaces.insert(path.clone(), surf);
-                        }
-                    }
+                if !s.surfaces.contains_key(path)
+                    && let Some(dec) = s.cache.get_thumbnail(path)
+                    && let Ok(surf) = rgba_to_cairo_surface(&dec.rgba)
+                {
+                    s.surfaces.insert(path.clone(), surf);
                 }
 
                 if let Some(surface) = s.surfaces.get(path) {
@@ -168,12 +190,26 @@ impl Filmstrip {
                     if is_active {
                         // Glowing accent border around active thumbnail
                         cr.save().ok();
-                        draw_rounded_rect(cr, dx - 1.5, dy - 1.5, dw + 3.0, dh + 3.0, CORNER_RADIUS + 1.0);
+                        draw_rounded_rect(
+                            cr,
+                            dx - 1.5,
+                            dy - 1.5,
+                            dw + 3.0,
+                            dh + 3.0,
+                            CORNER_RADIUS + 1.0,
+                        );
                         cr.set_source_rgba(ar, ag, ab, 0.35);
                         cr.set_line_width(4.5);
                         let _ = cr.stroke();
 
-                        draw_rounded_rect(cr, dx - 1.0, dy - 1.0, dw + 2.0, dh + 2.0, CORNER_RADIUS + 0.5);
+                        draw_rounded_rect(
+                            cr,
+                            dx - 1.0,
+                            dy - 1.0,
+                            dw + 2.0,
+                            dh + 2.0,
+                            CORNER_RADIUS + 0.5,
+                        );
                         cr.set_source_rgba(ar, ag, ab, 1.0);
                         cr.set_line_width(2.2);
                         let _ = cr.stroke();
@@ -188,7 +224,11 @@ impl Filmstrip {
 
                         // Index number below thumbnail (matches sample_ui.jpeg)
                         cr.save().ok();
-                        cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+                        cr.select_font_face(
+                            "sans-serif",
+                            cairo::FontSlant::Normal,
+                            cairo::FontWeight::Bold,
+                        );
                         cr.set_font_size(11.0);
                         cr.set_source_rgba(ar, ag, ab, 1.0);
                         let idx_str = format!("{}", idx + 1);
@@ -208,12 +248,26 @@ impl Filmstrip {
                 } else {
                     // Placeholder box
                     cr.save().ok();
-                    draw_rounded_rect(cr, thumb_box_x, thumb_box_y, THUMB_MAX_WIDTH, THUMB_MAX_HEIGHT, CORNER_RADIUS);
+                    draw_rounded_rect(
+                        cr,
+                        thumb_box_x,
+                        thumb_box_y,
+                        THUMB_MAX_WIDTH,
+                        THUMB_MAX_HEIGHT,
+                        CORNER_RADIUS,
+                    );
                     cr.set_source_rgba(1.0, 1.0, 1.0, 0.05);
                     let _ = cr.fill();
 
                     if is_active {
-                        draw_rounded_rect(cr, thumb_box_x, thumb_box_y, THUMB_MAX_WIDTH, THUMB_MAX_HEIGHT, CORNER_RADIUS);
+                        draw_rounded_rect(
+                            cr,
+                            thumb_box_x,
+                            thumb_box_y,
+                            THUMB_MAX_WIDTH,
+                            THUMB_MAX_HEIGHT,
+                            CORNER_RADIUS,
+                        );
                         cr.set_source_rgba(ar, ag, ab, 1.0);
                         cr.set_line_width(2.5);
                         let _ = cr.stroke();
@@ -224,13 +278,11 @@ impl Filmstrip {
                     let path_buf = path.clone();
                     let cache_clone = s.cache.clone();
 
-                    std::thread::spawn(move || {
-                        if let Ok(img) = load_dynamic_image(&path_buf) {
-                            let thumb = generate_thumbnail(&img, 180);
-                            cache_clone.put_thumbnail(path_buf, Arc::new(thumb));
-                            trigger_filmstrip_redraw();
-                        }
-                    });
+                    if s.loading.insert(path_buf.clone()) {
+                        cache_clone.request_thumbnail(path_buf.clone(), move |result| {
+                            trigger_filmstrip_redraw(path_buf, result.is_ok());
+                        });
+                    }
                 }
             }
 
@@ -275,7 +327,7 @@ impl Filmstrip {
                 };
 
                 let h = SLOT_HEIGHT;
-                let i = s.active_index as f64;
+                let i = s.display_index;
                 let offset_y = (height / 2.0) - (i * h + (h / 2.0));
 
                 let relative_y = y - offset_y;
@@ -421,6 +473,7 @@ impl Filmstrip {
             btn_down,
             state,
             on_select,
+            animating: Rc::new(Cell::new(false)),
         }
     }
 
@@ -432,18 +485,51 @@ impl Filmstrip {
         if let Ok(mut s) = self.state.try_borrow_mut() {
             s.paths = paths;
             s.active_index = active_index;
+            s.display_index = active_index as f64;
             s.surfaces.clear();
+            s.loading.clear();
         }
         self.area.queue_draw();
     }
 
     pub fn set_active_index(&self, index: usize) {
         if let Ok(mut s) = self.state.try_borrow_mut() {
-            if s.active_index != index {
-                s.active_index = index;
-                self.area.queue_draw();
-            }
+            s.active_index = index.min(s.paths.len().saturating_sub(1));
         }
+        self.animate_selection();
+        self.area.queue_draw();
+    }
+
+    fn animate_selection(&self) {
+        if self.animating.replace(true) {
+            return;
+        }
+        let state = self.state.clone();
+        let animating = self.animating.clone();
+        let last_frame = Cell::new(None);
+        self.area.add_tick_callback(move |area, clock| {
+            let now = clock.frame_time();
+            let dt = last_frame
+                .get()
+                .map_or(1.0 / 60.0, |last| (now - last) as f64 / 1_000_000.0);
+            last_frame.set(Some(now));
+            let enabled = area.settings().is_gtk_enable_animations();
+            let mut s = state.borrow_mut();
+            let target = s.active_index as f64;
+            s.display_index += (target - s.display_index) * (1.0 - (-dt / 0.045).exp());
+            let done = !enabled || (target - s.display_index).abs() < 0.002;
+            if done {
+                s.display_index = target;
+                animating.set(false);
+            }
+            drop(s);
+            area.queue_draw();
+            if done {
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
     }
 
     pub fn set_colors(&self, colors: OmarchyColors) {
@@ -455,5 +541,12 @@ impl Filmstrip {
 
     pub fn connect_select<F: Fn(usize) + 'static>(&self, callback: F) {
         *self.on_select.borrow_mut() = Some(std::boxed::Box::new(callback));
+    }
+
+    pub fn invalidate(&self, path: &std::path::Path) {
+        let mut s = self.state.borrow_mut();
+        s.surfaces.remove(path);
+        s.loading.remove(path);
+        self.area.queue_draw();
     }
 }

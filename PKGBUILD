@@ -1,6 +1,6 @@
 # Maintainer: Omarchy Community <https://github.com/HaroldFinch02/Omaview>
 pkgname=omaview
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc="Dead-simple, theme-aware image viewer for Omarchy / Hyprland"
 arch=('x86_64' 'aarch64' 'riscv64')

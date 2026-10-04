@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlbumConfig {
@@ -41,14 +41,8 @@ pub fn config_path() -> PathBuf {
 
 pub fn load_albums() -> Vec<PathBuf> {
     let path = config_path();
-    if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(config) = toml::from_str::<AlbumConfig>(&content) {
-                if !config.albums.is_empty() {
-                    return config.albums;
-                }
-            }
-        }
+    if let Some(albums) = read_saved_albums(&path) {
+        return albums;
     }
 
     // Default configuration
@@ -57,10 +51,16 @@ pub fn load_albums() -> Vec<PathBuf> {
     default_cfg.albums
 }
 
+fn read_saved_albums(path: &Path) -> Option<Vec<PathBuf>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    Some(toml::from_str::<AlbumConfig>(&content).ok()?.albums)
+}
+
 pub fn save_albums(albums: &[PathBuf]) -> Result<(), String> {
     let path = config_path();
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create album config directory: {e}"))?;
     }
 
     let config = AlbumConfig {
@@ -93,7 +93,8 @@ pub fn add_album(new_path: PathBuf) -> Result<Vec<PathBuf>, String> {
 
 pub fn remove_album(to_remove: &Path) -> Result<Vec<PathBuf>, String> {
     let mut albums = load_albums();
-    let canonical_target = std::fs::canonicalize(to_remove).unwrap_or_else(|_| to_remove.to_path_buf());
+    let canonical_target =
+        std::fs::canonicalize(to_remove).unwrap_or_else(|_| to_remove.to_path_buf());
 
     albums.retain(|p| {
         let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
@@ -109,8 +110,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn empty_saved_album_list_stays_empty() {
+        let path =
+            std::env::temp_dir().join(format!("omaview-empty-albums-{}.toml", std::process::id()));
+        std::fs::write(&path, "albums = []").unwrap();
+        assert_eq!(read_saved_albums(&path), Some(Vec::new()));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn test_default_pictures_dir() {
         let dir = default_pictures_dir();
-        assert!(dir.exists() || dir == PathBuf::from("."));
+        assert!(dir.exists() || dir == *".");
     }
 }

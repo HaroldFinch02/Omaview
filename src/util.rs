@@ -1,18 +1,20 @@
-use std::path::{Path, PathBuf};
+pub type Callback<F> = std::rc::Rc<std::cell::RefCell<Option<Box<F>>>>;
+
+use crate::raw_loader::{RAW_EXTENSIONS, is_raw_image};
 use gio::prelude::FileExt;
-use crate::raw_loader::{is_raw_image, RAW_EXTENSIONS};
+use std::path::{Path, PathBuf};
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "jpe", "jfif", "webp", "gif", "bmp", "tiff", "tif", "ico",
 ];
 
 pub fn is_supported_image(path: &Path) -> bool {
-    if let Some(ext) = path.extension() {
-        if let Some(ext_str) = ext.to_str() {
-            let lower = ext_str.to_ascii_lowercase();
-            return SUPPORTED_EXTENSIONS.contains(&lower.as_str())
-                || RAW_EXTENSIONS.contains(&lower.as_str());
-        }
+    if let Some(ext) = path.extension()
+        && let Some(ext_str) = ext.to_str()
+    {
+        let lower = ext_str.to_ascii_lowercase();
+        return SUPPORTED_EXTENSIONS.contains(&lower.as_str())
+            || RAW_EXTENSIONS.contains(&lower.as_str());
     }
     false
 }
@@ -44,10 +46,10 @@ fn natural_sort_key(s: &str) -> Vec<SortChunk> {
     if !current_chars.is_empty() {
         chunks.push(SortChunk::Text(current_chars.to_lowercase()));
     }
-    if !current_digits.is_empty() {
-        if let Ok(num) = current_digits.parse::<u64>() {
-            chunks.push(SortChunk::Number(num));
-        }
+    if !current_digits.is_empty()
+        && let Ok(num) = current_digits.parse::<u64>()
+    {
+        chunks.push(SortChunk::Number(num));
     }
 
     chunks
@@ -70,10 +72,10 @@ pub fn scan_directory_images(dir: &Path) -> Vec<PathBuf> {
         for entry in read_dir.flatten() {
             let path = entry.path();
             if path.is_file() && is_supported_image(&path) {
-                if is_raw_image(&path) {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        raw_stems.insert(stem.to_ascii_lowercase());
-                    }
+                if is_raw_image(&path)
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                {
+                    raw_stems.insert(stem.to_ascii_lowercase());
                 }
                 all_files.push(path);
             }
@@ -82,20 +84,20 @@ pub fn scan_directory_images(dir: &Path) -> Vec<PathBuf> {
 
     let mut entries = Vec::new();
     for path in all_files {
-        if !is_raw_image(&path) {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if raw_stems.contains(&stem.to_ascii_lowercase()) {
-                    continue;
-                }
-            }
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            && raw_stems.contains(&stem.to_ascii_lowercase())
+        {
+            continue;
         }
         entries.push(path);
     }
 
-    entries.sort_by(|a, b| {
-        let name_a = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let name_b = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        natural_sort_key(name_a).cmp(&natural_sort_key(name_b))
+    entries.sort_by_cached_key(|p| {
+        natural_sort_key(&p.file_name().unwrap_or_default().to_string_lossy())
     });
 
     entries
@@ -198,14 +200,8 @@ mod tests {
 
     #[test]
     fn test_natural_sort() {
-        let mut names = vec![
-            "img10.png",
-            "img1.png",
-            "img2.png",
-            "img20.png",
-            "img3.png",
-        ];
-        names.sort_by(|a, b| natural_sort_key(a).cmp(&natural_sort_key(b)));
+        let mut names = vec!["img10.png", "img1.png", "img2.png", "img20.png", "img3.png"];
+        names.sort_by_key(|a| natural_sort_key(a));
         assert_eq!(
             names,
             vec!["img1.png", "img2.png", "img3.png", "img10.png", "img20.png"]
@@ -214,12 +210,14 @@ mod tests {
 
     #[test]
     fn test_scan_directory_images_with_companion_pairing() {
-        let temp_dir = std::env::temp_dir().join(format!("omaview_test_pairing_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("omaview_test_pairing_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);
 
         // Create pair: DSC001.ARW and DSC001.JPG
         let _ = std::fs::write(temp_dir.join("DSC001.ARW"), b"rawdata");
         let _ = std::fs::write(temp_dir.join("DSC001.JPG"), b"jpgdata");
+        let _ = std::fs::write(temp_dir.join("DSC001.png"), b"pngdata");
 
         // Create standalone raw: DSC002.NEF
         let _ = std::fs::write(temp_dir.join("DSC002.NEF"), b"rawdata2");
@@ -238,7 +236,8 @@ mod tests {
         assert!(!filenames.contains(&"DSC001.JPG".to_string()));
         assert!(filenames.contains(&"DSC002.NEF".to_string()));
         assert!(filenames.contains(&"photo.png".to_string()));
-        assert_eq!(scanned.len(), 3);
+        assert!(filenames.contains(&"DSC001.png".to_string()));
+        assert_eq!(scanned.len(), 4);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
