@@ -308,3 +308,8 @@
 - Filmstrip draws only visible slots and smoothly recenters using the GTK frame clock. Zoom interpolation handles fractional scroll input. Both animations honor GTK's animation setting and stop requesting frames when settled. Fit zoom metadata updates on resize.
 - Shared each album image list among cards instead of cloning it per card; expanded grids are created on demand. RAW extraction publishes completed cache files atomically and supports PPM previews. Replaced inappropriate callback locks with main-thread Rc/RefCell state, simplified Clippy findings, and formatted Rust sources.
 - Verification: 33 tests pass, including new regression coverage for crop geometry, EXIF orientation, JPEG/failed saves, concurrent decode sharing, cache invalidation, thumbnail LRU, malformed theme colors, and empty album persistence. The GTK regression smoke test exercises clamped navigation, edit reset, zoom, Zen mode, and overwrite/reload. `cargo clippy --locked --all-targets -- -D warnings` and `cargo fmt --all --check` pass; optimized release build verified. Performance improvements are structural; no before/after FPS benchmark was taken.
+
+### Release v1.0.1 and local installation
+- Updated Cargo package/lockfile and PKGBUILD versions to 1.0.1; retained the existing `v*` release tag convention.
+- Built `cargo build --release --locked` and installed the optimized binary with `install -m 755 target/release/omaview ~/.local/bin/omaview`.
+- Verified installed and built binaries have identical SHA-256 hashes and all shared libraries resolve. Existing desktop launcher resolves to the local binary.
