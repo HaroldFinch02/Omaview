@@ -58,6 +58,7 @@ pub struct MainWindow {
     raw_chooser_popover: Rc<RefCell<Option<Popover>>>,
     toast_overlay: libadwaita::ToastOverlay,
     saving: Rc<Cell<bool>>,
+    copying: Rc<Cell<bool>>,
 }
 
 impl MainWindow {
@@ -221,6 +222,7 @@ impl MainWindow {
             raw_chooser_popover: Rc::new(RefCell::new(None)),
             toast_overlay,
             saving: Rc::new(Cell::new(false)),
+            copying: Rc::new(Cell::new(false)),
         };
 
         win.setup_controllers(&center_column);
@@ -408,6 +410,11 @@ impl MainWindow {
             win_info.show_info_popover();
         });
 
+        let win_copy = self.clone();
+        self.toolbar.connect_copy(move || {
+            win_copy.handle_action(AppAction::CopyImage);
+        });
+
         let win_trash = self.clone();
         self.toolbar
             .connect_trash(move || win_trash.trash_current());
@@ -500,6 +507,7 @@ impl MainWindow {
             AppAction::ToggleZen => self.toggle_zen(),
             AppAction::ToggleFilmstrip => self.toggle_filmstrip(),
             AppAction::Save => self.save_current(),
+            AppAction::CopyImage => self.copy_current_image(),
             AppAction::ShowHelp => show_shortcuts_dialog(&self.window),
             AppAction::ToggleFullscreen => {
                 if self.window.is_fullscreen() {
@@ -527,11 +535,13 @@ impl MainWindow {
     pub fn show_home(&self) {
         self.home_screen.refresh();
         self.stack.set_visible_child_name("home");
+        self.update_copy_button();
         self.window.set_title(Some("Omaview - Albums"));
     }
 
     pub fn show_viewer(&self) {
         self.stack.set_visible_child_name("viewer");
+        self.update_copy_button();
         self.window.set_title(Some("Omaview"));
     }
 
@@ -573,6 +583,7 @@ impl MainWindow {
 
         self.filmstrip.set_active_index(index);
         self.viewport.begin_loading();
+        self.update_copy_button();
         self.toolbar.reset_adjustments_ui();
         self.update_save_button();
 
@@ -581,6 +592,7 @@ impl MainWindow {
         // Check if already in memory cache
         if let Some(loaded) = self.cache.get_image(&path) {
             self.viewport.set_image(loaded.clone());
+            self.update_copy_button();
             self.update_metadata_pill_with(&loaded, index, total);
             self.preload_neighbors(index);
             return;
@@ -616,6 +628,7 @@ impl MainWindow {
                         match result {
                             Ok(loaded) => {
                                 win.viewport.set_image(loaded.clone());
+                                win.update_copy_button();
                                 win.update_metadata_pill_with(&loaded, index, total);
                                 win.update_save_button();
                             }
@@ -866,6 +879,51 @@ impl MainWindow {
         self.toolbar.set_save_visible(has_edits);
         self.btn_top_save
             .set_visible(has_edits && !self.state.borrow().zen_mode);
+    }
+
+    fn update_copy_button(&self) {
+        self.toolbar.set_copy_sensitive(
+            self.stack.visible_child_name().as_deref() == Some("viewer")
+                && self.viewport.get_current_image().is_some()
+                && !self.copying.get(),
+        );
+    }
+
+    fn copy_current_image(&self) {
+        if self.copying.get() || self.stack.visible_child_name().as_deref() != Some("viewer") {
+            return;
+        }
+        let Some(loaded) = self.viewport.get_current_image() else {
+            return;
+        };
+        let edits = self.viewport.get_edits();
+        self.copying.set(true);
+        self.update_copy_button();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        crate::image_loader::run_background(move || {
+            let rgba = apply_all_edits(&loaded.image, &edits).into_rgba8();
+            let dimensions = (rgba.width(), rgba.height());
+            let _ = sender.send((dimensions, rgba.into_raw()));
+        });
+        let win = self.clone();
+        glib::timeout_add_local(Duration::from_millis(16), move || {
+            let result = match receiver.try_recv() {
+                Ok(((width, height), pixels)) => {
+                    clipboard_texture(width, height, pixels).map(|texture| {
+                        win.window.clipboard().set_texture(&texture);
+                    })
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(_) => Err("Image copy worker stopped".into()),
+            };
+            win.copying.set(false);
+            win.update_copy_button();
+            match result {
+                Ok(()) => win.show_toast("Image copied to clipboard"),
+                Err(error) => win.show_toast(&error),
+            }
+            glib::ControlFlow::Break
+        });
     }
 
     pub fn save_current(&self) {
@@ -1153,9 +1211,34 @@ impl MainWindow {
     }
 }
 
+fn clipboard_texture(
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+) -> Result<gdk4::MemoryTexture, String> {
+    let stride = (width as usize).checked_mul(4);
+    let expected = stride.and_then(|stride| stride.checked_mul(height as usize));
+    if width == 0
+        || height == 0
+        || width > i32::MAX as u32
+        || height > i32::MAX as u32
+        || expected != Some(pixels.len())
+    {
+        return Err("Cannot copy image: invalid image dimensions or pixel buffer".into());
+    }
+    let bytes = glib::Bytes::from_owned(pixels);
+    Ok(gdk4::MemoryTexture::new(
+        width as i32,
+        height as i32,
+        gdk4::MemoryFormat::R8g8b8a8,
+        &bytes,
+        stride.unwrap(),
+    ))
+}
+
 #[cfg(test)]
 pub fn verify_gui_regressions() {
-    fn pump_until(condition: impl Fn() -> bool) {
+    fn pump_until(mut condition: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !condition() {
             assert!(
@@ -1166,11 +1249,67 @@ pub fn verify_gui_regressions() {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
+    fn assert_clipboard(win: &MainWindow, expected: &image::RgbaImage) {
+        let result = Rc::new(RefCell::new(None));
+        let received = result.clone();
+        win.window
+            .clipboard()
+            .read_texture_async(gio::Cancellable::NONE, move |texture| {
+                *received.borrow_mut() = Some(texture)
+            });
+        pump_until(|| result.borrow().is_some());
+        let texture = result.borrow_mut().take().unwrap().unwrap().unwrap();
+        let actual = image::load_from_memory(texture.save_to_png_bytes().as_ref())
+            .unwrap()
+            .into_rgba8();
+        // When available, verify PNG transfer to an independent Wayland client.
+        if gtk4::prelude::WidgetExt::display(&win.window)
+            .type_()
+            .name()
+            == "GdkWaylandDisplay"
+            && let Ok(binary) = crate::external_editor::check_binary_in_path("wl-paste")
+        {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let output = std::process::Command::new(binary)
+                    .args(["--type", "image/png"])
+                    .output();
+                let _ = sender.send(output);
+            });
+            let mut output = None;
+            pump_until(|| {
+                output = receiver.try_recv().ok();
+                output.is_some()
+            });
+            let output = output.unwrap().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let pasted = image::load_from_memory(&output.stdout)
+                .unwrap()
+                .into_rgba8();
+            assert_eq!(pasted, actual);
+        }
+        assert_eq!(actual.dimensions(), expected.dimensions());
+        for (actual, expected) in actual.pixels().zip(expected.pixels()) {
+            // Texture serialization can round premultiplied color channels.
+            for channel in 0..3 {
+                assert!(actual[channel].abs_diff(expected[channel]) <= 1);
+            }
+            assert_eq!(actual[3], expected[3]);
+        }
+    }
+
     let dir = std::env::temp_dir().join(format!("omaview-gui-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let first = dir.join("first.png");
     let second = dir.join("second.png");
-    image::DynamicImage::new_rgb8(16, 8).save(&first).unwrap();
+    let source = image::RgbaImage::from_fn(16, 8, |x, y| {
+        image::Rgba([(x * 12) as u8, (y * 24) as u8, 120, 128])
+    });
+    source.save(&first).unwrap();
     image::DynamicImage::new_rgb8(12, 6).save(&second).unwrap();
     let app = libadwaita::Application::builder()
         .application_id("org.omarchy.omaview.tests")
@@ -1193,6 +1332,97 @@ pub fn verify_gui_regressions() {
     assert!(!win.viewport.get_edits().has_any_edits());
     pump_until(|| win.viewport.get_current_image().is_some());
     assert_eq!(win.viewport.get_current_image().unwrap().path, first);
+    // Button and keyboard action share the same copy implementation.
+    let copy_button = {
+        let mut child = win.toolbar.widget().first_child();
+        loop {
+            let widget = child.expect("Copy image button missing");
+            if widget.tooltip_text().as_deref() == Some("Copy image (y)") {
+                break widget.downcast::<Button>().unwrap();
+            }
+            child = widget.next_sibling();
+        }
+    };
+    assert!(copy_button.is_sensitive());
+    // A previous-image preview may still be finishing after navigation.
+    pump_until(|| win.viewport.is_in_crop_mode() || win.viewport.toggle_crop());
+    // Unapplied selection is not copied.
+    win.viewport.zoom_100();
+    copy_button.emit_clicked();
+    assert!(win.copying.get());
+    assert!(!copy_button.is_sensitive());
+    pump_until(|| !win.copying.get());
+    assert_clipboard(&win, &source);
+    win.viewport.cancel_crop();
+
+    let controllers = win.window.observe_controllers();
+    let keys = (0..controllers.n_items())
+        .find_map(|idx| {
+            controllers
+                .item(idx)?
+                .downcast::<gtk4::EventControllerKey>()
+                .ok()
+        })
+        .unwrap();
+    for key in [gdk4::Key::y, gdk4::Key::Y] {
+        assert!(
+            keys.emit_by_name::<bool>("key-pressed", &[&key, &0u32, &gdk4::ModifierType::empty()],)
+        );
+        assert!(win.copying.get());
+        pump_until(|| !win.copying.get());
+        assert_clipboard(&win, &source);
+    }
+    let popover = Popover::new();
+    popover.set_parent(&copy_button);
+    let entry = gtk4::Entry::new();
+    popover.set_child(Some(&entry));
+    popover.popup();
+    entry.grab_focus();
+    pump_until(|| {
+        gtk4::prelude::GtkWindowExt::focus(&win.window)
+            .is_some_and(|focus| focus.is::<gtk4::Editable>())
+    });
+    assert!(!keys.emit_by_name::<bool>(
+        "key-pressed",
+        &[&gdk4::Key::y, &0u32, &gdk4::ModifierType::empty()],
+    ));
+    assert!(!win.copying.get());
+    popover.popdown();
+    popover.unparent();
+
+    assert!(win.viewport.toggle_crop());
+    win.viewport.apply_crop();
+    win.viewport.rotate_cw();
+    win.viewport.flip_h();
+    win.viewport.update_adjustments(10.0, 5.0, 10.0, 5.0);
+    let snapshot_edits = win.viewport.get_edits();
+    let expected = apply_all_edits(
+        &win.viewport.get_current_image().unwrap().image,
+        &snapshot_edits,
+    )
+    .into_rgba8();
+    win.handle_action(AppAction::CopyImage);
+    win.handle_action(AppAction::CopyImage); // Repeated requests must not queue.
+    win.go_to_index(1);
+    pump_until(|| !win.copying.get());
+    assert_clipboard(&win, &expected);
+    win.show_home();
+    win.handle_action(AppAction::CopyImage);
+    assert!(!win.copying.get());
+    assert_clipboard(&win, &expected);
+    win.show_viewer();
+    win.viewport.begin_loading();
+    win.update_copy_button();
+    assert!(!copy_button.is_sensitive());
+    win.handle_action(AppAction::CopyImage);
+    assert!(!win.copying.get());
+    assert_clipboard(&win, &expected);
+    assert!(clipboard_texture(0, 1, vec![]).is_err());
+    assert!(clipboard_texture(1, 1, vec![0; 3]).is_err());
+    assert!(clipboard_texture(u32::MAX, 1, vec![]).is_err());
+    win.go_to_index(0);
+    pump_until(|| win.viewport.get_current_image().is_some());
+
     win.viewport.zoom_in();
     pump_until(|| {
         !win.viewport.widget().settings().is_gtk_enable_animations()
