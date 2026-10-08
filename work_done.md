@@ -348,8 +348,3 @@
 - Copies full-resolution RGBA pixels including current unsaved edits; preserves transparency and uses the available decoded preview for RAW images. Zoom, pan, chrome, and unapplied crop selections are excluded.
 - Captures image/edits on request and prepares pixels on the existing background pool. Native GDK clipboard publication runs on the GTK thread. Navigation can continue; duplicate requests are ignored while copying. Home/loading requests do nothing, and the button is disabled until an image is ready. Success and worker/buffer failures use existing toasts.
 - Extended the existing GTK regression with button and keyboard activation, input-field exclusion, transparent original/edited pixel readback, crop handling, navigation during copying, repeated requests, Home/loading states, and invalid texture buffers. On Wayland with `wl-paste` installed, it also verifies PNG transfer to an independent client.
-- Verification: all 34 tests pass; the GTK regression also passed with `GDK_BACKEND=wayland`, including the `wl-paste` PNG transfer. `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `git diff --check` pass. Manual paste into chat/document/image-editor apps and visual toolbar inspection were not performed. No version bump, release, or application installation.
-
-### Local installation of clipboard feature — 2026-10-08
-- Built `cargo build --release --locked --offline` and replaced the existing `~/.local/bin/omaview` using `install -m 755`.
-- Verified installed/build binaries have identical SHA-256 hashes and all shared libraries resolve. The existing desktop entry uses `Exec=omaview %U`, which resolves to the updated local binary.
