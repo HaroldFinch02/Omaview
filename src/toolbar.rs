@@ -17,6 +17,7 @@ pub struct BottomToolbar {
     btn_adjust: Button,
     btn_info: Button,
     btn_open_raw: Button,
+    btn_copy: Button,
     btn_trash: Button,
     btn_save: Button,
 
@@ -99,6 +100,10 @@ impl BottomToolbar {
         );
         btn_open_raw.set_visible(false);
         container.append(&btn_open_raw);
+
+        let btn_copy = make_btn("edit-copy-symbolic", "Copy image (y)");
+        btn_copy.set_sensitive(false);
+        container.append(&btn_copy);
 
         // 11. Trash (matches sample_ui.jpeg 10th icon)
         let btn_trash = make_btn("user-trash-symbolic", "Move to Trash (Delete / d)");
@@ -198,6 +203,7 @@ impl BottomToolbar {
             btn_adjust,
             btn_info,
             btn_open_raw,
+            btn_copy,
             btn_trash,
             btn_save,
             adjustments_popover,
@@ -304,6 +310,14 @@ impl BottomToolbar {
 
     pub fn connect_rotate_cw<F: Fn() + 'static>(&self, f: F) {
         self.btn_rotate_cw.connect_clicked(move |_| f());
+    }
+
+    pub fn connect_copy<F: Fn() + 'static>(&self, callback: F) {
+        self.btn_copy.connect_clicked(move |_| callback());
+    }
+
+    pub fn set_copy_sensitive(&self, sensitive: bool) {
+        self.btn_copy.set_sensitive(sensitive);
     }
 
     pub fn connect_trash<F: Fn() + 'static>(&self, f: F) {

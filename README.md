@@ -101,7 +101,8 @@ Omaview is designed from first principles for **Omarchy Linux** and the **Hyprla
 
 5. **Floating Bottom Pill Toolbar**
    - Rounded capsule floating at the bottom center matching the Omarchy design system:
-     `[ Previous ] [ Filmstrip ] [ Zoom In ] (•) [ Zoom Out ] [ Crop ] [ Rotate ] [ Adjustments ] [ Info ] [ Trash ]`
+     `[ Previous ] [ Filmstrip ] [ Zoom In ] (•) [ Zoom Out ] [ Crop ] [ Rotate ] [ Adjustments ] [ Info ] [ Copy ] [ Trash ]`
+   - **Copy image (y)** copies full-resolution pixels with current edits, preserving transparency.
    - Active highlight indicators for toggled states.
    - Real-time adjustments drawer:
      - **Exposure** (-100 to +100)
@@ -144,6 +145,7 @@ Omaview is designed from first principles for **Omarchy Linux** and the **Hyprla
 | <kbd>i</kbd> | Toggle detailed EXIF metadata popover |
 | <kbd>d</kbd> / <kbd>Delete</kbd> | Move image to Trash (via `gio::File::trash`) |
 | <kbd>g</kbd> | Toggle filmstrip visibility |
+| <kbd>y</kbd> | Copy image including unsaved edits to clipboard |
 | <kbd>s</kbd> | Save changes (Prompt for Overwrite or Save As) |
 | <kbd>Tab</kbd> / <kbd>z</kbd> | Toggle Zen mode (edge-to-edge view) |
 | <kbd>F11</kbd> | Toggle fullscreen |
